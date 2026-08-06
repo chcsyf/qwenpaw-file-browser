@@ -1,5 +1,5 @@
 """
-QwenPaw 文件浏览器插件 v0.2.3
+QwenPaw 文件浏览器插件 v0.1.0
 浏览器窗口：分层级浏览/查看/下载 QwenPaw 工作区（QWENPAW_WORKING_DIR）以及
 （平台模式下）容器内所有可访问的路径（NAS 持久层 / 容器本地盘 /tmp /home /root
 /workspace / 系统盘只读等）。
@@ -15,7 +15,7 @@ QwenPaw 文件浏览器插件 v0.2.3
 接口（挂载于 /api/qwenpaw-file-browser/）：
   - GET  /status            插件状态、版本、WORKING_DIR、当前模式、快捷根目录列表
   - GET  /ls?path=          列出目录（path 支持绝对路径或相对 WORKING_DIR；空 = WORKING_DIR）
-  - GET  /read?path=        读取文本文件内容（预览，默认最多 256KB，超长截断）
+  - GET  /read?path=        读取文本文件内容（预览，默认不限大小；可传 max_bytes 限制）
   - GET  /download?path=    下载文件（二进制安全，附件）
   - POST /upload            上传文件到目录 ?path=<dir>，multipart 多文件（冲突自动重命名）
   - POST /mkdir             新建文件夹 {path, parents?}
@@ -45,16 +45,16 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.2.3"
+PLUGIN_VERSION = "0.1.0"
 
 router = APIRouter()
 
 # 访问模式（进程级）：None = auto（按环境自动判断）
 _mode = {"mode": None}
 
-# 读取预览上限：默认 256KB，超过截断；超过该大小的文件不直接预览
-_READ_MAX_BYTES = 256 * 1024
-_READ_HARD_LIMIT = 10 * 1024 * 1024
+# 读取预览上限：默认 -1 = 不限制大小（按需求全量读取）；
+# 调用方可显式传 max_bytes 做按需截断
+_READ_MAX_BYTES = -1
 
 
 def _working_dir() -> Path:
@@ -292,7 +292,7 @@ async def ls(path: str = Query("", description="目录路径（绝对或相对 W
 @router.get("/read")
 async def read_file(
     path: str = Query("", description="文件路径（绝对或相对）"),
-    max_bytes: int = Query(_READ_MAX_BYTES, ge=1, le=_READ_MAX_BYTES),
+    max_bytes: int = Query(_READ_MAX_BYTES, ge=-1, description="预览上限字节数，-1 = 不限制"),
 ):
     p = _resolve(path)
     if not p.exists():
@@ -303,16 +303,14 @@ async def read_file(
         size = p.stat().st_size
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"读取文件信息失败: {e}") from e
-    if size > _READ_HARD_LIMIT:
-        raise HTTPException(status_code=413, detail=f"文件过大（{_fmt_size(size)}），请下载查看")
     try:
         raw = p.read_bytes()
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=f"没有权限读取文件: {p}") from e
     except OSError as e:
         raise HTTPException(status_code=500, detail=f"读取文件失败: {e}") from e
-    truncated = size > max_bytes
-    data = raw[:max_bytes]
+    truncated = False if max_bytes < 0 else size > max_bytes
+    data = raw if max_bytes < 0 else raw[:max_bytes]
     text = None
     if b"\x00" in data:
         # 含 NUL 字节，判定为二进制

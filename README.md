@@ -1,8 +1,8 @@
-# 📁 文件浏览器 (qwenpaw-file-browser) v0.0.1
+# 📁 文件浏览器 (qwenpaw-file-browser) v0.1.0
 
 QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、上传、下载文件与目录，自动识别运行环境（qwenpaw-agentscope-platform 平台 / 本地部署），平台与本地通用。采用 [Apache License 2.0](LICENSE) 许可协议发布。
 
-## 功能（v0.0.1）
+## 功能（v0.1.0）
 
 - 📂 **分层级浏览目录**：图标 / 名称 / 大小 / 修改时间 / 绝对路径
 - ⬆️ **上传文件**：多选上传到当前目录，文件名冲突自动重命名为 `name (1).ext`，流式写入
@@ -14,7 +14,16 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
   - 界面提供「🌐 平台模式 / 📦 工作区模式」手动切换
 - 📁 **文件夹操作**：新建文件夹、重命名（文件/文件夹）、删除（目录递归删除带二次确认）
 - ✅ **批量操作**：多选（勾选/全选）→ 批量打包下载（zip，目录递归收集）或批量删除
-- 📄 **文本预览**：UTF-8 文本默认最多 256KB，超长截断；二进制/超大文件提示下载
+- 📄 **预览渲染（不限大小）**：全量读取，无 256KB 截断 / 10MB 硬限制
+  - **Markdown**（`.md` / `.markdown`）渲染：标题 / 列表 / 任务列表 / 表格 / 引用 /
+    代码块（带语法高亮）/ 链接 / 图片等，GitHub Dark 风格
+  - **JSON / JSONC**：自动格式化（缩进 2 空格）+ 语法高亮
+  - **场景/配置文件**（`.yaml` / `.yml` / `.toml` / `.ini` / `.conf` / `.cfg` /
+    `.env` / `.properties` / `.xml`）：语法高亮渲染
+  - **常见代码文件**（`.py` / `.js` / `.ts` / `.sh` / `.go` / `.rs` / `.c` / `.cpp` 等）：语法高亮
+  - 渲染策略：运行时优先复用宿主全局的 `marked` / `hljs` / `Prism`（若存在），
+    否则内置轻量渲染器（零外部依赖、离线可用），外部库输出经 HTML 清洗
+  - 二进制文件提示下载
 - ⬇️ **下载**：任意文件（二进制安全，附件方式）
 - 🔄 **一键刷新**当前目录
 - 🛡️ **安全**：工作区模式越界拦截；删除保护（禁止删除 `/`、主目录、QwenPaw 数据根目录）；
@@ -31,7 +40,7 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
 |---|---|---|
 | GET  | `/api/qwenpaw-file-browser/status` | 插件状态、版本、WORKING_DIR、当前模式（`mode`/`mode_source`/`platform_detected`）、快捷根目录列表 |
 | GET  | `/api/qwenpaw-file-browser/ls?path=<dir>` | 列出目录（返回 `path`/`parent`/`entries`：name/type/size/size_h/mtime/path） |
-| GET  | `/api/qwenpaw-file-browser/read?path=<file>&max_bytes=<n>` | 预览文本文件（默认 256KB，超长截断；二进制返回 415） |
+| GET  | `/api/qwenpaw-file-browser/read?path=<file>&max_bytes=<n>` | 预览文本文件（默认不限大小 `max_bytes=-1`；显式传 `max_bytes` 可截断；二进制返回 415） |
 | GET  | `/api/qwenpaw-file-browser/download?path=<file>` | 下载单个文件（附件） |
 | POST | `/api/qwenpaw-file-browser/upload?path=<dir>` | 上传文件，multipart 多文件（`files` 字段，冲突自动重命名） |
 | POST | `/api/qwenpaw-file-browser/mkdir` | 新建文件夹 `{"path": "...", "parents": false}` |
@@ -44,10 +53,16 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
 ## 安装 / 升级
 
 ```bash
+# 发布前校验（可选但建议）
 qwenpaw plugin validate ./qwenpaw-file-browser
-qwenpaw plugin uninstall qwenpaw-file-browser   # 已有旧版时先卸载
-qwenpaw plugin install ./qwenpaw-file-browser
+# 安装 / 覆盖更新（QwenPaw 运行中走 API 热装，无需重启）
+qwenpaw plugin install ./qwenpaw-file-browser --force
 ```
+
+> 注意：不要用 `uninstall` + `install` 两步走——`uninstall` 有交互确认
+> （`click.confirm`），在脚本 / 非交互环境下会卡住，且旧版未卸载时
+> `install` 会因 id 已存在而拒绝。`--force` 一步完成覆盖更新（rmtree
+> 旧目录 → 复制新目录），非交互环境不卡。
 
 刷新 QwenPaw 页面，侧边栏/设置菜单出现「📁 文件浏览器」入口，点击进入 `/apps/qwenpaw-file-browser`。
 平台（platform.agentscope.io）部署：在插件管理页面上传 zip 即可。
@@ -78,6 +93,8 @@ qwenpaw-file-browser/
 
 ## 已知限制
 
-- 预览仅支持 UTF-8 文本（默认最大 256KB）；二进制/超大文件请下载查看。
+- 预览仅支持 UTF-8 文本；二进制文件请下载查看。不限大小意味着超大文件（数百 MB 以上）
+  全量读取会占用较多内存/带宽，渲染可能较慢，属预期行为。
+- 内置渲染器支持 GFM 常用语法子集（复杂扩展如 Mermaid 图、脚注等需宿主提供 marked 等全局库时方可渲染）。
 - 平台模式下写操作遵循系统权限：系统盘（`/app` 等）只读，写通常会失败并返回明确错误。
 - 批量打包下载使用临时 zip 文件，超大目录可能较慢。
