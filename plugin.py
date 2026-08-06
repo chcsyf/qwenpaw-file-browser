@@ -1,5 +1,5 @@
 """
-QwenPaw 文件浏览器插件 v0.1.0
+QwenPaw 文件浏览器插件 v0.1.1
 浏览器窗口：分层级浏览/查看/下载 QwenPaw 工作区（QWENPAW_WORKING_DIR）以及
 （平台模式下）容器内所有可访问的路径（NAS 持久层 / 容器本地盘 /tmp /home /root
 /workspace / 系统盘只读等）。
@@ -45,7 +45,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.1"
 
 router = APIRouter()
 
@@ -145,7 +145,12 @@ def _fmt_size(n: int) -> str:
 
 
 def _roots() -> list:
-    """快捷根目录（按当前模式过滤：工作区模式只返回 WORKING_DIR）。"""
+    """快捷根目录（按当前模式过滤：工作区模式只返回 WORKING_DIR）。
+
+    平台模式下额外扫描各智能体工作区目录：WORKING_DIR 形如
+    <...>/workspaces/<agent_id>，其父目录 workspaces/ 下每个子目录
+    即一个智能体的工作区，一并作为快捷根目录。
+    """
     mode = _effective_mode()
     wd = _working_dir().resolve()
     if mode == "workdir":
@@ -154,6 +159,25 @@ def _roots() -> list:
             "label": "WORKING_DIR",
         }]
     roots = [wd, Path("/tmp"), Path("/home"), Path("/root"), Path("/workspace")]
+    # 各智能体工作区目录，兼容两种部署布局：
+    # 布局A：WORKING_DIR 自身即某个智能体工作区（<...>/workspaces/<agent_id>）→ 扫描父级 workspaces/
+    # 布局B：WORKING_DIR 为平台根（<...>）→ 扫描其下 workspaces/ 子目录
+    agent_root = None
+    if wd.parent.name == "workspaces" and wd.parent.is_dir():
+        agent_root = wd.parent
+    else:
+        ws = wd / "workspaces"
+        if ws.is_dir():
+            agent_root = ws
+    if agent_root is not None:
+        try:
+            roots.extend(sorted(
+                (c for c in agent_root.iterdir()
+                 if c.is_dir() and not c.name.startswith(".")),
+                key=lambda c: c.name,
+            ))
+        except OSError:
+            pass
     # NAS 挂载入口（若存在）
     nas = Path("/run/csi/mount-root/nas")
     if nas.is_dir():
@@ -170,10 +194,15 @@ def _roots() -> list:
         if rr in seen or not rr.exists():
             continue
         seen.add(rr)
-        out.append({
-            "path": str(rr),
-            "label": "WORKING_DIR" if rr == wd else ("/ (文件系统根)" if rr == Path("/") else str(rr)),
-        })
+        if rr == wd:
+            label = "WORKING_DIR"
+        elif rr == Path("/").resolve():
+            label = "/ (文件系统根)"
+        elif agent_root is not None and rr.parent == agent_root:
+            label = "🤖 " + rr.name + "（工作区）"
+        else:
+            label = str(rr)
+        out.append({"path": str(rr), "label": label})
     return out
 
 

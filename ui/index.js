@@ -1,5 +1,5 @@
 /**
- * QwenPaw 文件浏览器 v0.1.0 — 前端 GUI
+ * QwenPaw 文件浏览器 v0.1.1 — 前端 GUI
  * 分层级浏览/查看/下载 QwenPaw 工作区以及容器内所有可访问路径；
  * 支持上传、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
  * 与 web-terminal 插件同一套开发范式：React.createElement + 样式对象 + GitHub Dark。
@@ -18,7 +18,7 @@
 
   var PLUGIN_ID = "qwenpaw-file-browser";
   var PLUGIN_NAME = "文件浏览器";
-  var VERSION = "0.1.0";
+  var VERSION = "0.1.1";
   var API_BASE = "/api/qwenpaw-file-browser";
 
   // fetch 封装：QwenPaw 不保证提供 QP.fetchJson，统一用原生 fetch
