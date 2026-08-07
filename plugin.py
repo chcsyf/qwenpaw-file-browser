@@ -1,5 +1,5 @@
 """
-QwenPaw 文件浏览器插件 v0.1.3
+QwenPaw 文件浏览器插件 v0.1.4
 浏览器窗口：分层级浏览/查看/下载 QwenPaw 工作区（QWENPAW_WORKING_DIR）以及
 （平台模式下）容器内所有可访问的路径（NAS 持久层 / 容器本地盘 /tmp /home /root
 /workspace / 系统盘只读等）。
@@ -46,7 +46,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 
 router = APIRouter()
 

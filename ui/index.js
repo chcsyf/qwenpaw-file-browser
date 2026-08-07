@@ -1,5 +1,5 @@
 /**
- * QwenPaw 文件浏览器 v0.1.3 — 前端 GUI
+ * QwenPaw 文件浏览器 v0.1.4 — 前端 GUI
  * 分层级浏览/查看/下载 QwenPaw 工作区以及容器内所有可访问路径；
  * 支持上传（按钮/拖拽/整文件夹）、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
  * 与 web-terminal 插件同一套开发范式：React.createElement + 样式对象 + GitHub Dark。
@@ -18,8 +18,11 @@
 
   var PLUGIN_ID = "qwenpaw-file-browser";
   var PLUGIN_NAME = "文件浏览器";
-  var VERSION = "0.1.3";
+  var VERSION = "0.1.4";
   var API_BASE = "/api/qwenpaw-file-browser";
+
+  // localStorage 键：记住上次打开的目录，刷新页面后恢复当前位置
+  var LS_CUR = "qwenpaw-file-browser:curPath";
 
   // fetch 封装：QwenPaw 不保证提供 QP.fetchJson，统一用原生 fetch
   function fetchJson(url, opts) {
@@ -683,13 +686,19 @@
 
     var selectedList = Object.keys(selected).map(function (k) { return selected[k]; });
 
-    // 加载 status
+    // 加载 status：优先恢复上次打开位置（localStorage），否则回默认 WORKING_DIR
     React.useEffect(function () {
       fetchJson(API_BASE + "/status")
         .then(function (data) {
           if (data && data.ok) {
             setRootInfo(data);
-            if (!curPath && data.workdir) setCurPath(data.workdir);
+            var saved = null;
+            try { saved = localStorage.getItem(LS_CUR); } catch (e) { saved = null; }
+            if (!curPath && saved) {
+              setCurPath(saved);
+            } else if (!curPath && data.workdir) {
+              setCurPath(data.workdir);
+            }
           }
         })
         .catch(function (err) { console.error("[qwenpaw-file-browser] status failed:", err); });
@@ -715,13 +724,19 @@
             toast("仅允许访问 QwenPaw 根目录，已自动返回", true);
             return;
           }
+          // 平台模式下保存的路径不可用（被删除/移动/无权限）：清除记录，避免每次刷新都失败
+          try { localStorage.removeItem(LS_CUR); } catch (e) { /* 忽略 */ }
           setEntries({ entries: [], parent: null, error: msg });
         })
         .finally(function () { setLoading(false); });
     }, [rootInfo]);
 
     React.useEffect(function () {
-      if (curPath) fetchList(curPath);
+      if (curPath) {
+        fetchList(curPath);
+        // 记住当前打开位置，刷新后恢复
+        try { localStorage.setItem(LS_CUR, curPath); } catch (e) { /* localStorage 不可用时忽略 */ }
+      }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [curPath]);
 
