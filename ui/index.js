@@ -1,7 +1,7 @@
 /**
- * QwenPaw 文件浏览器 v0.1.2 — 前端 GUI
+ * QwenPaw 文件浏览器 v0.1.3 — 前端 GUI
  * 分层级浏览/查看/下载 QwenPaw 工作区以及容器内所有可访问路径；
- * 支持上传、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
+ * 支持上传（按钮/拖拽/整文件夹）、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
  * 与 web-terminal 插件同一套开发范式：React.createElement + 样式对象 + GitHub Dark。
  */
 (function () {
@@ -18,7 +18,7 @@
 
   var PLUGIN_ID = "qwenpaw-file-browser";
   var PLUGIN_NAME = "文件浏览器";
-  var VERSION = "0.1.2";
+  var VERSION = "0.1.3";
   var API_BASE = "/api/qwenpaw-file-browser";
 
   // fetch 封装：QwenPaw 不保证提供 QP.fetchJson，统一用原生 fetch
@@ -510,6 +510,16 @@
     },
     toolHint: { color: "#8b949e", fontSize: 12 },
     body: { flex: 1, minHeight: 0, overflow: "auto", background: "#0d1117" },
+    dropOverlay: {
+      position: "fixed", inset: 0, zIndex: 9998, pointerEvents: "none",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      background: "rgba(31,111,235,0.12)",
+    },
+    dropHint: {
+      background: "#0d1117", color: "#58a6ff", border: "2px dashed #58a6ff",
+      borderRadius: 12, padding: "18px 40px", fontSize: 15, fontWeight: 600,
+      boxShadow: "0 8px 32px rgba(0,0,0,.5)",
+    },
     table: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
     th: {
       textAlign: "left", padding: "6px 10px", color: "#8b949e", fontSize: 12, fontWeight: 600,
@@ -582,6 +592,59 @@
     }, 2600);
   }
 
+  // ---------- 拖拽上传：递归收集文件（保留目录结构） ----------
+  // 用 DataTransferItem.webkitGetAsEntry 递归遍历目录树，给每个 File 附加
+  // _relPath（相对路径）；entry API 不可用时退化为仅收集顶层文件。
+  function collectDropItems(dataTransfer, cb) {
+    var files = [];
+    var pending = 0;
+    var finish = function () { cb(files); };
+    var items = dataTransfer && dataTransfer.items;
+    var firstEntry = items && items.length && items[0].webkitGetAsEntry
+      ? items[0].webkitGetAsEntry()
+      : null;
+    if (!firstEntry || (firstEntry.isFile === undefined && firstEntry.isDirectory === undefined)) {
+      // 环境不支持目录遍历：退化为顶层文件
+      var fl = (dataTransfer && dataTransfer.files) || [];
+      for (var i = 0; i < fl.length; i++) files.push(fl[i]);
+      finish();
+      return;
+    }
+    var traverse = function (entry, prefix) {
+      if (entry.isFile) {
+        pending++;
+        entry.file(function (file) {
+          try { file._relPath = prefix ? prefix + "/" + file.name : file.name; } catch (e) { /* noop */ }
+          files.push(file);
+          if (--pending === 0) finish();
+        }, function () { if (--pending === 0) finish(); });
+      } else if (entry.isDirectory) {
+        var reader = entry.createReader();
+        var readBatch = function () {
+          reader.readEntries(function (entries) {
+            if (!entries.length) {
+              if (--pending === 0) finish();
+              return;
+            }
+            entries.forEach(function (child) {
+              traverse(child, prefix ? prefix + "/" + entry.name : entry.name);
+            });
+            readBatch(); // 大目录一次读不完，需循环读至空
+          }, function () { if (--pending === 0) finish(); });
+        };
+        pending++;
+        readBatch();
+      } else {
+        if (--pending === 0) finish();
+      }
+    };
+    for (var j = 0; j < items.length; j++) {
+      var e = items[j].webkitGetAsEntry ? items[j].webkitGetAsEntry() : null;
+      if (e) traverse(e, "");
+    }
+    if (pending === 0) finish();
+  }
+
   // ---------- 主组件 ----------
   function FileBrowserComponent() {
     var _p = React.useState("");            // 当前绝对路径（空 = 等待 status）
@@ -604,7 +667,19 @@
     var addr = _a[0], setAddr = _a[1];
     var _u = React.useState(false);         // 上传中
     var uploading = _u[0], setUploading = _u[1];
+    var _dr = React.useState(false);        // 拖拽悬停高亮
+    var dragOver = _dr[0], setDragOver = _dr[1];
     var fileInput = React.useRef(null);     // 隐藏的文件选择框
+    var dirInput = React.useRef(null);      // 隐藏的文件夹选择框（webkitdirectory）
+    var dragDepth = React.useRef(0);        // 拖拽进出计数（避免子元素间移动闪烁）
+
+    // 确保文件夹选择框启用 webkitdirectory（React 属性 + DOM 兜底）
+    React.useEffect(function () {
+      if (dirInput.current) {
+        dirInput.current.setAttribute("webkitdirectory", "");
+        dirInput.current.setAttribute("directory", "");
+      }
+    }, []);
 
     var selectedList = Object.keys(selected).map(function (k) { return selected[k]; });
 
@@ -848,12 +923,19 @@
       if (!fileList || !fileList.length || !curPath) return;
       setUploading(true);
       var fd = new FormData();
-      Array.prototype.forEach.call(fileList, function (f) { fd.append("files", f, f.name); });
+      Array.prototype.forEach.call(fileList, function (f) {
+        // 文件夹选择/拖拽目录时用相对路径（保留目录结构），普通文件用文件名
+        var rel = f._relPath || f.webkitRelativePath || f.name;
+        fd.append("files", f, rel);
+      });
       fetch(API_BASE + "/upload?path=" + encodeURIComponent(curPath), { method: "POST", body: fd })
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (!data || data.ok === false) throw new Error((data && data.detail) || "上传失败");
-          toast("已上传 " + data.saved.length + " 个文件：" + data.saved.join("、"));
+          var dirs = data.dirs || [];
+          var msg = "已上传 " + data.saved.length + " 个文件";
+          if (dirs.length) msg += "（新建 " + dirs.length + " 个文件夹）";
+          toast(msg + "：" + data.saved.join("、"));
           fetchList(curPath);
         })
         .catch(function (err) { toast(String((err && err.message) || err), true); })
@@ -863,6 +945,39 @@
     function onPickFiles(ev) {
       uploadFiles(ev.currentTarget.files);
       ev.currentTarget.value = ""; // 允许重复选择同一文件
+    }
+
+    function onPickDir(ev) {
+      var arr = Array.prototype.slice.call(ev.currentTarget.files || []);
+      uploadFiles(arr); // File.webkitRelativePath 自动带目录结构
+      ev.currentTarget.value = ""; // 允许重复选择同一文件夹
+    }
+
+    // 拖拽事件（绑定到页面根容器）
+    function onDragEnter(ev) {
+      ev.preventDefault();
+      dragDepth.current++;
+      setDragOver(true);
+    }
+    function onDragOver(ev) {
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = "copy";
+    }
+    function onDragLeave(ev) {
+      ev.preventDefault();
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (dragDepth.current === 0) setDragOver(false);
+    }
+    function onDrop(ev) {
+      ev.preventDefault();
+      dragDepth.current = 0;
+      setDragOver(false);
+      if (!curPath) { toast("请先进入目标目录再拖拽上传", true); return; }
+      if (uploading) { toast("正在上传中，请稍候", true); return; }
+      collectDropItems(ev.dataTransfer, function (files) {
+        if (!files.length) { toast("未读取到可上传的文件", true); return; }
+        uploadFiles(files);
+      });
     }
 
     // 表格行
@@ -1021,12 +1136,23 @@
         ref: fileInput, type: "file", multiple: true, style: { display: "none" },
         onChange: onPickFiles,
       }),
+      h("input", {
+        ref: dirInput, type: "file", multiple: true, style: { display: "none" },
+        webkitdirectory: "", directory: "",
+        onChange: onPickDir,
+      }),
       h("button", {
         style: S.btnPrimary,
         onClick: function () { if (fileInput.current) fileInput.current.click(); },
         disabled: uploading,
-        title: "上传文件到当前目录（支持多选）",
+        title: "上传文件到当前目录（支持多选，也可直接把文件/文件夹拖进窗口）",
       }, uploading ? "⬆ 上传中…" : "⬆ 上传"),
+      h("button", {
+        style: S.btnPrimary,
+        onClick: function () { if (dirInput.current) dirInput.current.click(); },
+        disabled: uploading,
+        title: "上传整个文件夹到当前目录（保留目录结构）",
+      }, uploading ? "⬆ 上传中…" : "📁 上传文件夹"),
       h("button", { style: S.btnPrimary, onClick: confirmNewDir }, "📁 新建文件夹"),
       h("button", { style: S.btn, onClick: function () { if (curPath) fetchList(curPath); } }, "🔄 刷新"),
       h("select", {
@@ -1047,7 +1173,13 @@
       h("span", { style: Object.assign({}, S.toolHint, { marginLeft: "auto" }) },
         isPlatform ? "平台模式：可访问所有支持访问的路径（遵循系统权限）" : "工作区模式：仅 QwenPaw 根目录，点击「🌐 平台模式」可切换"));
 
-    return h("div", { style: S.page },
+    return h("div", {
+      style: S.page,
+      onDragEnter: onDragEnter,
+      onDragOver: onDragOver,
+      onDragLeave: onDragLeave,
+      onDrop: onDrop,
+    },
       h("div", { style: S.header },
         h("span", { style: S.brand }, "📁 " + PLUGIN_NAME),
         h("span", { style: S.badge }, "v" + VERSION),
@@ -1080,7 +1212,10 @@
           ? (isPlatform ? "（自动识别）" : "（未检测到平台）")
           : "（手动）")),
       actionModal,
-      previewModal);
+      previewModal,
+      dragOver ? h("div", { style: S.dropOverlay },
+        h("div", { style: S.dropHint }, "📥 松开鼠标，上传到当前目录" +
+          (curPath ? "：" + curPath : ""))) : null);
   }
 
   // ---------- 弹层组件 ----------

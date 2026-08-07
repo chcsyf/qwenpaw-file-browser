@@ -1,5 +1,5 @@
 """
-QwenPaw 文件浏览器插件 v0.1.2
+QwenPaw 文件浏览器插件 v0.1.3
 浏览器窗口：分层级浏览/查看/下载 QwenPaw 工作区（QWENPAW_WORKING_DIR）以及
 （平台模式下）容器内所有可访问的路径（NAS 持久层 / 容器本地盘 /tmp /home /root
 /workspace / 系统盘只读等）。
@@ -17,7 +17,8 @@ QwenPaw 文件浏览器插件 v0.1.2
   - GET  /ls?path=          列出目录（path 支持绝对路径或相对 WORKING_DIR；空 = WORKING_DIR）
   - GET  /read?path=        读取文本文件内容（预览，默认不限大小；可传 max_bytes 限制）
   - GET  /download?path=    下载文件（二进制安全，附件）
-  - POST /upload            上传文件到目录 ?path=<dir>，multipart 多文件（冲突自动重命名）
+  - POST /upload            上传文件到目录 ?path=<dir>，multipart 多文件；filename 可带相对路径
+                            （如 folder/sub/a.txt）自动创建父目录、保留目录结构；冲突自动重命名；防路径穿越
   - POST /mkdir             新建文件夹 {path, parents?}
   - POST /rename            重命名 {path, new_name}
   - POST /delete            删除 {path, recursive?}（目录默认非递归，须显式 recursive=true）
@@ -45,7 +46,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 
 router = APIRouter()
 
@@ -414,25 +415,53 @@ async def upload(
         raise HTTPException(status_code=400, detail=f"不是目录: {p}")
     if not files:
         raise HTTPException(status_code=400, detail="未收到文件")
+    root = p.resolve()
     saved: list[str] = []
+    created_dirs: set[str] = set()
     for f in files:
-        raw = os.path.basename((f.filename or "").replace("\\", "/"))
-        if not raw:
+        # filename 可为纯文件名，也可带相对路径（folder/sub/a.txt，文件夹上传/拖拽上传）
+        raw = (f.filename or "").replace("\\", "/")
+        # 显式拒绝绝对路径与父目录跳转，避免语义歧义
+        if raw.startswith("/") or any(seg == ".." for seg in raw.split("/")):
+            raise HTTPException(status_code=400, detail=f"非法路径: {raw}")
+        parts = [seg for seg in raw.split("/") if seg and seg != "."]
+        if not parts:
             continue
-        dest = p / raw
+        rel = "/".join(parts)
+        dest = (root / rel).resolve()
+        # 防路径穿越：解析后必须仍在目标目录内
+        try:
+            dest.relative_to(root)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"非法路径: {raw}") from None
+        # 自动创建缺失的父目录（已存在则合并，保留目录结构）
+        parent = dest.parent
+        missing: list[Path] = []
+        cur = parent
+        while not cur.exists() and cur != root:
+            missing.append(cur)
+            cur = cur.parent
+        for d in reversed(missing):
+            try:
+                d.mkdir(exist_ok=True)
+                created_dirs.add(str(d.relative_to(root)))
+            except PermissionError as e:
+                raise HTTPException(status_code=403, detail=f"没有权限创建目录: {d}") from e
+            except OSError as e:
+                raise HTTPException(status_code=500, detail=f"创建目录失败: {d}") from e
         if dest.exists():
             # 冲突自动重命名：name (1).ext
-            base, ext = os.path.splitext(raw)
+            base, ext = os.path.splitext(dest.name)
             i = 1
             while dest.exists():
-                dest = p / f"{base} ({i}){ext}"
+                dest = dest.parent / f"{base} ({i}){ext}"
                 i += 1
         try:
             with dest.open("wb") as out:
                 shutil.copyfileobj(f.file, out, length=1024 * 1024)
-            saved.append(dest.name)
+            saved.append(str(dest.relative_to(root)))
         except PermissionError as e:
-            raise HTTPException(status_code=403, detail=f"没有权限写入目录: {p}") from e
+            raise HTTPException(status_code=403, detail=f"没有权限写入目录: {dest.parent}") from e
         except OSError as e:
             raise HTTPException(status_code=500, detail=f"保存文件失败: {e}") from e
         finally:
@@ -442,7 +471,12 @@ async def upload(
                 pass
     if not saved:
         raise HTTPException(status_code=400, detail="没有可保存的文件")
-    return {"ok": True, "path": str(p), "saved": saved}
+    return {
+        "ok": True,
+        "path": str(p),
+        "saved": saved,
+        "dirs": sorted(created_dirs),
+    }
 
 
 @router.post("/mkdir")

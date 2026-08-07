@@ -1,11 +1,13 @@
-# 📁 文件浏览器 (qwenpaw-file-browser) v0.1.2
+# 📁 文件浏览器 (qwenpaw-file-browser) v0.1.3
 
 QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、上传、下载文件与目录，自动识别运行环境（qwenpaw-agentscope-platform 平台 / 本地部署），平台与本地通用。采用 [Apache License 2.0](LICENSE) 许可协议发布。
 
-## 功能（v0.1.2）
+## 功能（v0.1.3）
 
 - 📂 **分层级浏览目录**：图标 / 名称 / 大小 / 修改时间 / 绝对路径
 - ⬆️ **上传文件**：多选上传到当前目录，文件名冲突自动重命名为 `name (1).ext`，流式写入
+- 📥 **拖拽上传**：把文件/文件夹直接拖入浏览器窗口即可上传到当前目录，悬停显示高亮提示
+- 📁 **上传文件夹**：一键选择整个文件夹上传，自动保留目录结构（多层子目录），同名目录自动合并、文件冲突自动重命名
 - 🌐 **访问范围自动适配**：
   - qwenpaw-agentscope-platform 平台（WORKING_DIR 位于 `/run/csi/mount-root/nas` 之下）
     默认「平台模式」：可访问所有支持访问的路径（NAS 持久层 / 容器本地盘 `/tmp` `/home`
@@ -45,7 +47,7 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
 | GET  | `/api/qwenpaw-file-browser/ls?path=<dir>` | 列出目录（返回 `path`/`parent`/`entries`：name/type/size/size_h/mtime/path） |
 | GET  | `/api/qwenpaw-file-browser/read?path=<file>&max_bytes=<n>` | 预览文本文件（默认不限大小 `max_bytes=-1`；显式传 `max_bytes` 可截断；二进制返回 415） |
 | GET  | `/api/qwenpaw-file-browser/download?path=<file>` | 下载单个文件（附件） |
-| POST | `/api/qwenpaw-file-browser/upload?path=<dir>` | 上传文件，multipart 多文件（`files` 字段，冲突自动重命名） |
+| POST | `/api/qwenpaw-file-browser/upload?path=<dir>` | 上传文件，multipart 多文件（`files` 字段）；filename 可带相对路径（如 `folder/sub/a.txt`）自动创建父目录保留目录结构，冲突自动重命名，防路径穿越；返回 `saved`/`dirs` |
 | POST | `/api/qwenpaw-file-browser/mkdir` | 新建文件夹 `{"path": "...", "parents": false}` |
 | POST | `/api/qwenpaw-file-browser/rename` | 重命名 `{"path": "...", "new_name": "..."}`（同目录内） |
 | POST | `/api/qwenpaw-file-browser/delete` | 删除 `{"path": "...", "recursive": false}`（目录递归需显式 true） |
