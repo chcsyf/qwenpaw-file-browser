@@ -633,6 +633,7 @@ class AIChatRequest(BaseModel):
     selected 当前选中的文件/文件夹路径列表（自动附加为上下文）
     session_id  会话 ID（前端持久化，同一 ID 延续 QwenPaw 会话历史）
     agent_id    目标 agent（可选，默认 default / X-Agent-Id）
+    model       模型选择（可选，格式 "provider_id:model"，空 = 使用 agent 默认模型）
     """
 
     text: str
@@ -640,6 +641,7 @@ class AIChatRequest(BaseModel):
     selected: List[str] = []
     session_id: str = ""
     agent_id: str = ""
+    model: str = ""
 
 
 def _build_ai_prompt(req: AIChatRequest) -> str:
@@ -719,6 +721,10 @@ async def ai_chat(
                 "user_id": "qwenpaw-file-browser",
                 "stream": True,
             }
+            # 模型切换：model_slot_override 格式 "provider_id:model"，
+            # Runtime 的 AgentRequest extra="allow" 会保留该字段并优先于 agent 默认模型
+            if req.model and ":" in req.model:
+                stream_req["model_slot_override"] = req.model
             async for ev in workspace.stream_query(stream_req):
                 yield _serialize_event(ev)
         except asyncio.CancelledError:
@@ -745,6 +751,48 @@ async def ai_chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/ai/models")
+async def ai_models(request: Request) -> dict:
+    """可用模型列表（供前端下拉选择）。
+
+    从主服务的 ProviderManager 收集所有 provider 的模型，
+    返回 [{value: "provider_id:model_id", label: "provider_name / model_name"}]。
+    """
+    try:
+        manager = getattr(request.app.state, "provider_manager", None)
+        if manager is None:
+            return {"ok": True, "models": [], "active": ""}
+        infos = await manager.list_provider_info()
+    except Exception as e:  # noqa: BLE001
+        logger.error("[qwenpaw-file-browser] ai/models failed: %s", e)
+        return {"ok": True, "models": [], "active": ""}
+
+    models = []
+    for info in infos or []:
+        pid = getattr(info, "id", "") or ""
+        pname = getattr(info, "name", "") or pid
+        if not pid:
+            continue
+        all_models = list(getattr(info, "models", None) or []) + list(
+            getattr(info, "extra_models", None) or []
+        )
+        seen = set()
+        for m in all_models:
+            mid = getattr(m, "id", "") or ""
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            mname = getattr(m, "name", "") or mid
+            models.append({
+                "value": f"{pid}:{mid}",
+                "label": f"{pname} / {mname}",
+                "provider": pname,
+                "model": mname,
+                "is_free": bool(getattr(m, "is_free", False)),
+            })
+    return {"ok": True, "models": models, "active": ""}
 
 
 class FileBrowserPlugin:

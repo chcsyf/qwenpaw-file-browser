@@ -579,21 +579,22 @@
     },
     // --- AI 助手面板（v0.2.0） ---
     aiPanel: {
-      position: "fixed", top: 0, right: 0, bottom: 0, width: 440, maxWidth: "92vw",
-      zIndex: 8000, display: "flex", flexDirection: "column",
-      background: "#0d1117", borderLeft: "1px solid #30363d",
-      boxShadow: "-8px 0 32px rgba(0,0,0,.4)",
+      position: "fixed", right: 16, bottom: 16, width: 440, maxWidth: "92vw",
+      height: "min(560px, 72vh)", zIndex: 8000, display: "flex", flexDirection: "column",
+      background: "#0d1117", border: "1px solid #30363d", borderRadius: 10,
+      boxShadow: "0 8px 32px rgba(0,0,0,.5)",
     },
     aiHeader: {
-      display: "flex", alignItems: "center", gap: 4, padding: "8px 12px",
+      display: "flex", alignItems: "center", gap: 6, padding: "8px 12px",
       background: "#161b22", borderBottom: "1px solid #30363d", flexShrink: 0,
+      borderTopLeftRadius: 10, borderTopRightRadius: 10,
     },
     aiBody: {
       flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px",
       display: "flex", flexDirection: "column", gap: 8,
     },
     aiRowUser: { display: "flex", justifyContent: "flex-end" },
-    aiRowAi: { display: "flex", justifyContent: "flex-start" },
+    aiRowAi: { display: "flex", justifyContent: "flex-start", flexDirection: "column", alignItems: "flex-start", gap: 4 },
     aiBubbleUser: {
       maxWidth: "85%", background: "#1f6feb", color: "#fff",
       borderRadius: "10px 10px 2px 10px", padding: "8px 12px", fontSize: 13,
@@ -604,10 +605,25 @@
       borderRadius: "10px 10px 10px 2px", padding: "8px 12px", fontSize: 13,
       border: "1px solid #30363d", wordBreak: "break-word",
     },
+    aiThink: {
+      maxWidth: "92%", color: "#8b949e", fontSize: 12,
+      background: "rgba(139,148,158,0.08)", borderLeft: "3px solid #484f58",
+      borderRadius: 4, padding: "6px 10px", whiteSpace: "pre-wrap", wordBreak: "break-word",
+    },
     aiEmpty: { color: "#8b949e", fontSize: 12, whiteSpace: "pre-line", textAlign: "center", paddingTop: 24 },
     aiFooter: {
       display: "flex", alignItems: "center", gap: 8, padding: "8px 12px",
       background: "#161b22", borderTop: "1px solid #30363d", flexShrink: 0,
+      borderBottomLeftRadius: 10, borderBottomRightRadius: 10,
+    },
+    aiModelSel: {
+      background: "#010409", color: "#e6edf3", border: "1px solid #30363d",
+      borderRadius: 6, padding: "2px 6px", fontSize: 12, outline: "none",
+      maxWidth: 150, flexShrink: 0,
+    },
+    aiApprove: {
+      background: "#161b22", border: "1px solid #d29922", borderRadius: 8,
+      padding: "8px 10px", fontSize: 12, color: "#c9d1d9",
     },
     overlay: {
       position: "fixed", inset: 0, background: "rgba(1,4,9,0.7)",
@@ -741,9 +757,21 @@
     var dirInput = React.useRef(null);      // 隐藏的文件夹选择框（webkitdirectory）
     var dragDepth = React.useRef(0);        // 拖拽进出计数（避免子元素间移动闪烁）
     // --- AI 辅助面板（v0.2.0） ---
-    var _aio = React.useState(false);       // AI 面板展开
+    var LS_AI_OPEN = "qwenpaw-file-browser:aiOpen";
+    var LS_AI_MSGS = "qwenpaw-file-browser:aiMsgs";
+    // 面板展开状态持久化：刷新后保持展开/收起
+    var _aio = React.useState(function () {
+      try { return localStorage.getItem(LS_AI_OPEN) === "1"; } catch (e) { return false; }
+    });
     var aiOpen = _aio[0], setAiOpen = _aio[1];
-    var _aim = React.useState([]);          // [{role:"user"|"ai", text}] 显示消息
+    // 对话消息持久化：刷新后恢复历史消息
+    var _aim = React.useState(function () {
+      try {
+        var v = localStorage.getItem(LS_AI_MSGS);
+        if (v) { var arr = JSON.parse(v); if (Array.isArray(arr)) return arr; }
+      } catch (e) { /* 忽略 */ }
+      return [];
+    });
     var aiMsgs = _aim[0], setAiMsgs = _aim[1];
     var _ait = React.useState("");          // AI 输入框
     var aiInput = _ait[0], setAiInput = _ait[1];
@@ -752,7 +780,32 @@
     var aiAbort = React.useRef(null);       // AbortController（停止按钮）
     var aiBodyRef = React.useRef(null);     // 消息列表滚动容器
     var aiReasoning = React.useRef(false);  // 当前是否处于思考（reasoning）流中
+    var _aimo = React.useState("");         // 模型选择（"provider:model"）
+    var aiModel = _aimo[0], setAiModel = _aimo[1];
+    var _aifs = React.useState([]);         // 可用模型列表 [{value,label,provider,model,is_free}]
+    var aiModels = _aifs[0], setAiModels = _aifs[1];
+    var _aia = React.useState([]);          // 待审批 [{request_id, tool_name, ...}]
+    var aiApprovals = _aia[0], setAiApprovals = _aia[1];
 
+    // 模型选择持久化 + 可用模型加载
+    var LS_AI_MODEL = "qwenpaw-file-browser:aiModel";
+    React.useEffect(function () {
+      var saved = null;
+      try { saved = localStorage.getItem(LS_AI_MODEL); } catch (e) { saved = null; }
+      fetchJson(API_BASE + "/ai/models")
+        .then(function (data) {
+          var list = (data && data.models) || [];
+          setAiModels(list);
+          // 优先用上次选择；没有则用第一个（若有）
+          var chosen = saved && list.some(function (m) { return m.value === saved; }) ? saved : "";
+          if (!chosen && list.length) chosen = list[0].value;
+          if (chosen) { setAiModel(chosen); }
+        })
+        .catch(function (err) { console.error("[qwenpaw-file-browser] ai/models failed:", err); });
+    }, []);
+
+    // 对话上下文持久化：session_id 存 localStorage，刷新不丢；
+    // 「清空对话」= 换新 session_id + 清空消息
     function aiSessionId() {
       var k = "qwenpaw-file-browser:aiSession";
       var v = null;
@@ -763,6 +816,13 @@
       }
       return v;
     }
+    function clearAiSession() {
+      try { localStorage.removeItem("qwenpaw-file-browser:aiSession"); } catch (e) { /* 忽略 */ }
+      try { localStorage.removeItem(LS_AI_MSGS); } catch (e) { /* 忽略 */ }
+      setAiMsgs([]);
+      setAiApprovals([]);
+    }
+
     // 消息变化时自动滚到底部
     React.useEffect(function () {
       if (aiBodyRef.current) {
@@ -770,11 +830,19 @@
       }
     }, [aiMsgs, aiBusy]);
 
+    // 面板展开状态 + 消息列表持久化（刷新后恢复）
+    React.useEffect(function () {
+      try { localStorage.setItem(LS_AI_OPEN, aiOpen ? "1" : "0"); } catch (e) { /* 忽略 */ }
+    }, [aiOpen]);
+    React.useEffect(function () {
+      try { localStorage.setItem(LS_AI_MSGS, JSON.stringify(aiMsgs)); } catch (e) { /* 忽略 */ }
+    }, [aiMsgs]);
+
     // AI 发送：自动附带当前路径 + 选中文件，SSE 流式渲染回复
     function sendAi() {
       var text = (aiInput || "").trim();
       if (!text || aiBusy) return;
-      setAiMsgs(function (prev) { return prev.concat([{ role: "user", text: text }, { role: "ai", text: "" }]); });
+      setAiMsgs(function (prev) { return prev.concat([{ role: "user", text: text }, { role: "ai", text: "", think: "" }]); });
       setAiInput("");
       setAiBusy(true);
       var ctrl = new AbortController();
@@ -788,6 +856,7 @@
           path: curPath || "",
           selected: selPaths,
           session_id: aiSessionId(),
+          model: aiModel,
         }),
         signal: ctrl.signal,
       }).then(function (r) {
@@ -835,15 +904,15 @@
           var last = next[next.length - 1];
           var errText = "⚠️ " + String(ev.error || "未知错误");
           if (last && last.role === "ai") {
-            next[next.length - 1] = { role: "ai", text: last.text ? last.text + "\n\n" + errText : errText };
+            next[next.length - 1] = { role: "ai", text: last.text ? last.text + "\n\n" + errText : errText, think: last.think || "" };
           } else {
-            next.push({ role: "ai", text: errText });
+            next.push({ role: "ai", text: errText, think: "" });
           }
           return next;
         });
         return;
       }
-      // 消息声明：reasoning（思考）不展示，message（正式回复）开始展示
+      // 消息声明：reasoning = 思考过程（灰色展示），message = 正式回复
       if (ev.object === "message") {
         aiReasoning.current = ev.type === "reasoning";
         if (ev.type === "message" && ev.role === "assistant" && ev.status === "completed") {
@@ -857,9 +926,9 @@
               var next = prev.slice();
               var last = next[next.length - 1];
               if (last && last.role === "ai") {
-                next[next.length - 1] = { role: "ai", text: full };
+                next[next.length - 1] = { role: "ai", text: full, think: last.think || "" };
               } else {
-                next.push({ role: "ai", text: full });
+                next.push({ role: "ai", text: full, think: "" });
               }
               return next;
             });
@@ -867,41 +936,100 @@
         }
         return;
       }
-      // 流式增量文本（跳过思考内容）
+      // 流式增量文本：思考内容进 think，正式回复进 text
       if (ev.object === "content" && ev.type === "text" && ev.text) {
-        if (aiReasoning.current) return;
-        setAiMsgs(function (prev) {
-          var next = prev.slice();
-          var last = next[next.length - 1];
-          if (last && last.role === "ai") {
-            next[next.length - 1] = { role: "ai", text: last.text + ev.text };
-          } else {
-            next.push({ role: "ai", text: ev.text });
-          }
-          return next;
-        });
-        return;
-      }
-      // 流结束：用 response.output 完整文本校正（双保险）
-      if (ev.object === "response" && ev.status === "completed" && ev.output) {
-        var fullText = "";
-        (ev.output || []).forEach(function (m) {
-          if (!m || m.type === "reasoning") return;
-          (m.content || []).forEach(function (c) {
-            if (c && c.type === "text" && c.text) fullText += c.text;
-          });
-        });
-        if (fullText) {
+        if (aiReasoning.current) {
           setAiMsgs(function (prev) {
             var next = prev.slice();
             var last = next[next.length - 1];
-            if (last && last.role === "ai" && last.text !== fullText) {
-              next[next.length - 1] = { role: "ai", text: fullText };
+            if (last && last.role === "ai") {
+              next[next.length - 1] = { role: "ai", text: last.text || "", think: (last.think || "") + ev.text };
+            } else {
+              next.push({ role: "ai", text: "", think: ev.text });
+            }
+            return next;
+          });
+        } else {
+          setAiMsgs(function (prev) {
+            var next = prev.slice();
+            var last = next[next.length - 1];
+            if (last && last.role === "ai") {
+              next[next.length - 1] = { role: "ai", text: last.text + ev.text, think: last.think || "" };
+            } else {
+              next.push({ role: "ai", text: ev.text, think: "" });
             }
             return next;
           });
         }
+        return;
       }
+      // 流结束：用 response.output 完整文本校正（双保险）；AI 可能操作过文件，静默刷新列表
+      if (ev.object === "response" && ev.status === "completed") {
+        if (ev.output) {
+          var fullText = "";
+          (ev.output || []).forEach(function (m) {
+            if (!m || m.type === "reasoning") return;
+            (m.content || []).forEach(function (c) {
+              if (c && c.type === "text" && c.text) fullText += c.text;
+            });
+          });
+          if (fullText) {
+            setAiMsgs(function (prev) {
+              var next = prev.slice();
+              var last = next[next.length - 1];
+              if (last && last.role === "ai" && last.text !== fullText) {
+                next[next.length - 1] = { role: "ai", text: fullText, think: last.think || "" };
+              }
+              return next;
+            });
+          }
+        }
+        // AI 可能创建/删除/重命名了文件：静默刷新当前目录列表
+        if (curPath) refreshQuiet(curPath);
+      }
+    }
+
+    // 静默刷新目录列表（不闪烁 loading）
+    function refreshQuiet(path) {
+      fetchJson(API_BASE + "/ls?path=" + encodeURIComponent(path))
+        .then(function (data) {
+          if (!data || data.ok === false || !Array.isArray(data.entries)) return;
+          setEntries(data);
+        })
+        .catch(function () { /* 静默失败，下次交互再刷 */ });
+    }
+
+    // AI 请求进行中：轮询待审批（tool_guard ASK 模式会挂起等待，需用户在
+    // 文件浏览器内处理；审批 API /api/approval 按 session 归属校验）
+    React.useEffect(function () {
+      if (!aiBusy) { setAiApprovals([]); return; }
+      var sid = aiSessionId();
+      var timer = setInterval(function () {
+        fetchJson("/api/approval/list")
+          .then(function (data) {
+            if (!data || !Array.isArray(data.pending_approvals)) return;
+            var mine = (data.pending_approvals || []).filter(function (p) {
+              return p && (p.session_id === sid || p.root_session_id === sid);
+            });
+            setAiApprovals(mine);
+          })
+          .catch(function () { /* 轮询失败忽略 */ });
+      }, 2500);
+      return function () { clearInterval(timer); };
+    }, [aiBusy]);
+
+    // 审批操作：允许 / 拒绝
+    function resolveApproval(req, approve) {
+      var body = { request_id: req.request_id, session_id: aiSessionId() };
+      fetchJson("/api/approval/" + (approve ? "approve" : "deny"), {
+        method: "POST",
+        body: body,
+      }).then(function () {
+        setAiApprovals(function (prev) { return prev.filter(function (p) { return p.request_id !== req.request_id; }); });
+      }).catch(function (err) {
+        console.error("[qwenpaw-file-browser] approval " + (approve ? "approve" : "deny") + " failed:", err);
+        setAiApprovals(function (prev) { return prev.filter(function (p) { return p.request_id !== req.request_id; }); });
+      });
     }
 
     function stopAi() {
@@ -1520,20 +1648,51 @@
         h("div", { style: S.aiHeader },
           h("span", { style: { color: "#e6edf3", fontWeight: 600, fontSize: 13 } }, "🤖 AI 助手"),
           h("span", { style: { color: "#8b949e", fontSize: 11, marginLeft: 6 } }, "自动附带当前路径与选中文件"),
+          aiModels.length ? h("select", {
+            style: Object.assign({}, S.aiModelSel, { marginLeft: 8 }),
+            value: aiModel,
+            title: "选择使用的大模型",
+            onChange: function (ev) {
+              var v = ev.currentTarget.value;
+              setAiModel(v);
+              try { localStorage.setItem(LS_AI_MODEL, v); } catch (e) { /* 忽略 */ }
+            },
+          }, aiModels.map(function (m) {
+            return h("option", { key: m.value, value: m.value }, m.label + (m.is_free ? "（免费）" : ""));
+          })) : null,
           h("button", {
             style: Object.assign({}, S.btn, { marginLeft: "auto", padding: "2px 8px" }),
+            title: "清空对话（换新会话，上下文重置）",
+            onClick: clearAiSession,
+          }, "🗑 清空"),
+          h("button", {
+            style: Object.assign({}, S.btn, { padding: "2px 8px" }),
             title: "收起",
             onClick: function () { setAiOpen(false); },
           }, "✕")),
         h("div", { style: S.aiBody, ref: aiBodyRef },
+          aiApprovals.length > 0 ? aiApprovals.map(function (req, j) {
+            return h("div", { key: "ap" + j, style: S.aiApprove },
+              h("div", { style: { color: "#d29922", fontWeight: 600, marginBottom: 4 } }, "⚠️ 需要审批"),
+              h("div", { style: { color: "#c9d1d9", wordBreak: "break-word" } },
+                "AI 请求执行工具：" + String(req.tool_display_name || req.tool_name || "未知")),
+              h("div", { style: { color: "#8b949e", fontSize: 11, margin: "4px 0", wordBreak: "break-word" } },
+                String((req && (req.result_summary || req.exact_target)) || "")),
+              h("div", { style: { display: "flex", gap: 6, marginTop: 6 } },
+                h("button", { style: Object.assign({}, S.btnPrimary, { padding: "2px 10px" }), onClick: function () { resolveApproval(req, true); } }, "允许"),
+                h("button", { style: Object.assign({}, S.btnDanger, { padding: "2px 10px" }), onClick: function () { resolveApproval(req, false); } }, "拒绝")));
+          }) : null,
           aiMsgs.length === 0
-            ? h("div", { style: S.aiEmpty }, "与 AI 对话，发送时自动附带：\n· 当前目录\n· 选中的文件 / 文件夹")
+            ? h("div", { style: S.aiEmpty }, "与 AI 对话，发送时自动附带：\n· 当前目录\n· 选中的文件 / 文件夹\n\n对话上下文会保留（刷新不丢失），\n「🗑 清空」可重置会话")
             : aiMsgs.map(function (m, i) {
                 if (m.role === "user") {
                   return h("div", { key: i, style: S.aiRowUser },
                     h("div", { style: S.aiBubbleUser }, escapeHtml(m.text)));
                 }
                 return h("div", { key: i, style: S.aiRowAi },
+                  (m.think ? h("div", { style: S.aiThink },
+                    h("div", { style: { color: "#8b949e", fontSize: 11, marginBottom: 2 } }, "🤔 思考过程"),
+                    escapeHtml(m.think)) : null),
                   h("div", {
                     className: "qfb-md",
                     style: S.aiBubbleAi,
@@ -1551,11 +1710,11 @@
             disabled: aiBusy,
           }),
           h("button", {
-            style: S.btnPrimary,
-            onClick: sendAi,
-            disabled: aiBusy || !(aiInput || "").trim(),
-          }, "发送"),
-          aiBusy ? h("button", { style: S.btnDanger, onClick: stopAi }, "⏹ 停止") : null))
+            style: aiBusy ? S.btnDanger : S.btnPrimary,
+            title: aiBusy ? "停止生成" : "发送",
+            onClick: aiBusy ? stopAi : sendAi,
+            disabled: !aiBusy && !(aiInput || "").trim(),
+          }, aiBusy ? "停止" : "发送")))
         : null,
       dragOver ? h("div", { style: S.dropOverlay },
         h("div", { style: S.dropHint }, "📥 松开鼠标，上传到当前目录" +

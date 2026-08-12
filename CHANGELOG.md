@@ -2,16 +2,26 @@
 
 ## v0.2.0 - 2026-08-12
 
-- **AI 助手面板**：工具栏新增「🤖 AI 助手」可折叠对话面板
+- **AI 助手面板**：工具栏新增「🤖 AI 助手」可折叠对话面板（右下角浮动，高度自适应）
   - 发送消息自动附带**当前目录**与**选中的文件/文件夹**作为上下文（前端展示实时可见）
   - 复用 QwenPaw agent 管线（`workspace.stream_query`）：同一 `session_id` 延续
     会话历史，支持工具调用/记忆/技能，与主聊天能力一致
-  - SSE 流式渲染（`object: content` 增量事件），跳过 reasoning 思考内容只展示正式回复；
-    消息完成时用完整文本校正，保证最终内容准确
-  - 支持「⏹ 停止」中断当前回复；会话 ID 存 localStorage，刷新页面后继续同一会话
-  - 后端新增 `POST /ai/chat`（SSE），从主服务 `MultiAgentManager` 获取 workspace，
-    非 QwenPaw 环境返回 503 明确提示
+  - SSE 流式渲染（`object: content` 增量事件），**思考过程**以灰色「🤔 思考过程」
+    区块单独展示，正式回复 Markdown 渲染；消息完成时用完整文本校正
+  - **模型选择**：面板顶部下拉可选可用大模型（`GET /ai/models` 收集所有 provider
+    模型），选择持久化到 localStorage，通过 `model_slot_override` 按请求切换
+  - **发送/停止同一按钮**：空闲显示「发送」，生成中切换为「停止」（红色，无方块图标）
+  - **文件操作后自动刷新**：AI 回复完成后静默刷新当前目录列表（AI 通过工具
+    创建/删除/重命名文件后立即可见）
+  - **审批处理**：AI 需要审批权限时（tool_guard ASK 模式挂起等待），面板内轮询
+    `/api/approval/list` 弹出「⚠️ 需要审批」卡片，可一键允许/拒绝（`/approve` `/deny`）
+  - **上下文持久化 + 清空**：会话 ID 存 localStorage，刷新页面后继续同一会话；
+    「🗑 清空」按钮重置会话（换新 session_id 并清空消息）
+  - 支持「停止」中断当前回复；后端新增 `POST /ai/chat`（SSE），从主服务
+    `MultiAgentManager` 获取 workspace，非 QwenPaw 环境返回 503 明确提示
 - 版本号统一为 0.2.0（plugin.py / ui/index.js / plugin.json / README）
+- 预览图更新为 `qwenpaw-file-browser.png`，README 图片引用改为 GitHub 绝对链接
+  （raw.githubusercontent.com），不再使用相对路径
 
 ## v0.1.5 - 2026-08-12
 
