@@ -14,6 +14,7 @@ QwenPaw 文件浏览器插件 v0.2.0
 
 接口（挂载于 /api/qwenpaw-file-browser/）：
   - GET  /status            插件状态、版本、WORKING_DIR、当前模式、快捷根目录列表
+  - GET  /editor/installed  检测代码编辑器插件（qwenpaw-code-editor）是否已安装
   - GET  /ls?path=          列出目录（path 支持绝对路径或相对 WORKING_DIR；空 = WORKING_DIR）
   - GET  /read?path=        读取文本文件内容（预览，默认不限大小；可传 max_bytes 限制）
   - GET  /download?path=    下载文件（二进制安全，附件）
@@ -282,6 +283,31 @@ async def status():
         "cwd": os.getcwd(),
         "roots": _roots(),
         **info,
+    }
+
+
+@router.get("/editor/installed")
+async def editor_installed():
+    """检测代码编辑器插件（qwenpaw-code-editor）是否已安装。
+
+    本插件与 code-editor 安装在同一 plugins/ 目录下（兄弟目录），
+    通过检查该目录是否存在及其 plugin.json 是否可加载来判断。
+    """
+    here = Path(__file__).resolve()
+    editor_dir = here.parent.parent / "qwenpaw-code-editor"
+    installed = False
+    if (editor_dir / "plugin.json").is_file():
+        try:
+            with open(editor_dir / "plugin.json", "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            installed = bool(meta.get("id") == "qwenpaw-code-editor")
+        except Exception:  # noqa: BLE001
+            installed = False
+    return {
+        "ok": True,
+        "installed": installed,
+        "plugin": "qwenpaw-code-editor",
+        "dir": str(editor_dir),
     }
 
 

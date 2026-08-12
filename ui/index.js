@@ -3,6 +3,8 @@
  * 分层级浏览/查看/下载 QwenPaw 工作区以及容器内所有可访问路径；
  * 支持上传（按钮/拖拽/整文件夹）、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
  * v0.2.0：AI 助手面板（可折叠对话，自动附带当前目录与选中文件，复用 QwenPaw agent 管线）。
+ * v0.2.1：预览弹层「✏️ 编辑」跳转代码编辑器（先探测 qwenpaw-code-editor 是否安装，
+ *          未安装则提示下载到本地编辑；列表行不再显示编辑按钮）。
  * 与 web-terminal 插件同一套开发范式：React.createElement + 样式对象 + GitHub Dark。
  */
 (function () {
@@ -1299,13 +1301,25 @@
       }
     }
 
-    // 在代码编辑器中打开：把目标路径写入 localStorage（同源整页跳转后仍保留），
+    // 在代码编辑器中打开：先探测 code-editor 插件是否已安装；
+    // 已安装则把目标路径写入 localStorage（同源整页跳转后仍保留），
     // 再跳转到 code-editor 插件。code-editor 初始化时读取并删除该键。
     // 说明：宿主 SPA 路由渲染时会重写 URL 丢弃 query，故不能用 ?file= 参数传递。
     function openInEditor(path) {
       if (!path) return;
-      try { localStorage.setItem("qwenpaw-code-editor:externalFile", path); } catch (e) { /* ignore */ }
-      window.location.href = "/plugin/qwenpaw-code-editor";
+      fetchJson(API_BASE + "/editor/installed")
+        .then(function (data) {
+          if (!data || data.ok === false) throw new Error((data && data.detail) || "检测代码编辑器失败");
+          if (!data.installed) {
+            toast("未安装代码编辑器插件，请先安装 qwenpaw-code-editor，或下载到本地编辑", true);
+            return;
+          }
+          try { localStorage.setItem("qwenpaw-code-editor:externalFile", path); } catch (e) { /* ignore */ }
+          window.location.href = "/plugin/qwenpaw-code-editor";
+        })
+        .catch(function (err) {
+          toast("检测代码编辑器失败：" + (err && err.message ? err.message : err), true);
+        });
     }
 
     function toggleMode() {
@@ -1435,12 +1449,6 @@
         h("td", { style: S.td }, isDir ? "-" : entry.size_h),
         h("td", { style: S.td }, fmtTime(entry.mtime)),
         h("td", { style: S.td },
-          h("button", {
-            style: S.opBtn,
-            title: isDir ? "文件夹不支持编辑" : "在代码编辑器中打开并编辑",
-            onClick: function (ev) { ev.stopPropagation(); isDir ? null : openInEditor(entry.path); },
-            disabled: isDir,
-          }, "编辑"),
           h("button", {
             style: S.opBtn,
             onClick: function (ev) { ev.stopPropagation(); isDir ? null : downloadOne(entry); },
