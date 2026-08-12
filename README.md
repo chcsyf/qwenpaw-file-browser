@@ -105,7 +105,7 @@ qwenpaw-file-browser/
 
 ## 变更记录
 
-见 [CHANGELOG.md](CHANGELOG.md)。
+见 [CHANGELOG.md](https://github.com/chcsyf/qwenpaw-file-browser/blob/main/CHANGELOG.md)。
 
 ## 安全警告
 
