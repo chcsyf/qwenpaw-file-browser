@@ -1,8 +1,8 @@
-# 📁 文件浏览器 (qwenpaw-file-browser) v0.2.0
+# 📁 文件浏览器 (qwenpaw-file-browser) v0.2.1
 
 QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、上传、下载文件与目录，自动识别运行环境（qwenpaw-agentscope-platform 平台 / 本地部署），平台与本地通用。采用 [Apache License 2.0](LICENSE) 许可协议发布。
 
-## 功能（v0.2.0）
+## 功能（v0.2.1）
 
 - 📂 **分层级浏览目录**：图标 / 名称 / 大小 / 修改时间 / 绝对路径
 - 🧭 **刷新保持当前位置**：当前打开的目录记入 localStorage，刷新页面后自动
@@ -60,6 +60,7 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET  | `/api/qwenpaw-file-browser/status` | 插件状态、版本、WORKING_DIR、当前模式（`mode`/`mode_source`/`platform_detected`）、快捷根目录列表 |
+| GET  | `/api/qwenpaw-file-browser/editor/installed` | 检测代码编辑器插件（qwenpaw-code-editor）是否已安装（供「✏️ 编辑」跳转前探测） |
 | GET  | `/api/qwenpaw-file-browser/ls?path=<dir>` | 列出目录（返回 `path`/`parent`/`entries`：name/type/size/size_h/mtime/path） |
 | GET  | `/api/qwenpaw-file-browser/read?path=<file>&max_bytes=<n>` | 预览文本文件（默认不限大小 `max_bytes=-1`；显式传 `max_bytes` 可截断；二进制返回 415） |
 | GET  | `/api/qwenpaw-file-browser/download?path=<file>` | 下载单个文件（附件） |
