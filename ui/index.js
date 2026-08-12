@@ -1,5 +1,5 @@
 /**
- * QwenPaw 文件浏览器 v0.1.4 — 前端 GUI
+ * QwenPaw 文件浏览器 v0.1.5 — 前端 GUI
  * 分层级浏览/查看/下载 QwenPaw 工作区以及容器内所有可访问路径；
  * 支持上传（按钮/拖拽/整文件夹）、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
  * 与 web-terminal 插件同一套开发范式：React.createElement + 样式对象 + GitHub Dark。
@@ -18,7 +18,7 @@
 
   var PLUGIN_ID = "qwenpaw-file-browser";
   var PLUGIN_NAME = "文件浏览器";
-  var VERSION = "0.1.4";
+  var VERSION = "0.1.5";
   var API_BASE = "/api/qwenpaw-file-browser";
 
   // localStorage 键：记住上次打开的目录，刷新页面后恢复当前位置
@@ -31,7 +31,19 @@
       method: o.method || "GET",
       headers: o.body ? { "Content-Type": "application/json" } : undefined,
       body: o.body ? JSON.stringify(o.body) : undefined,
-    }).then(function (r) { return r.json(); });
+    }).then(function (r) {
+      // 非 2xx 一律抛错：后端错误体是 {"detail": "..."}（无 ok 字段），
+      // 不检查 HTTP 状态会把错误响应当成功数据，导致渲染崩溃
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          var msg = (body && (body.detail || body.error || body.message)) || ("HTTP " + r.status);
+          var err = new Error(msg);
+          err.status = r.status;
+          throw err;
+        });
+      }
+      return r.json();
+    });
   }
 
   // ---------- 通用工具 ----------
@@ -456,6 +468,21 @@
     document.head.appendChild(st);
   }
 
+  // 滚动条样式：与 QwenPaw 控制台暗色风格一致（细滚动条 + 半透明浅色滑块）
+  function injectScrollbarStyle() {
+    if (document.getElementById("qfb-scrollbar-style")) return;
+    var st = document.createElement("style");
+    st.id = "qfb-scrollbar-style";
+    st.textContent =
+      "#qfb-root ::-webkit-scrollbar{width:8px;height:8px;}" +
+      "#qfb-root ::-webkit-scrollbar-track{background:transparent;}" +
+      "#qfb-root ::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.2);border-radius:4px;}" +
+      "#qfb-root ::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,0.3);}" +
+      "#qfb-root ::-webkit-scrollbar-corner{background:transparent;}";
+    document.head.appendChild(st);
+  }
+  injectScrollbarStyle();
+
   // ---------- 样式 ----------
   var S = {
     page: {
@@ -507,6 +534,11 @@
       padding: "2px 4px", fontSize: 13, borderRadius: 4,
     },
     sep: { color: "#484f58", margin: "0 1px" },
+    crumbCopyBtn: {
+      color: "#8b949e", cursor: "pointer", background: "#21262d",
+      border: "1px solid #30363d", borderRadius: 4, padding: "2px 8px",
+      fontSize: 12, whiteSpace: "nowrap", flexShrink: 0,
+    },
     toolRow: {
       display: "flex", alignItems: "center", gap: 8, padding: "6px 12px",
       background: "#0d1117", borderBottom: "1px solid #21262d", flexShrink: 0, flexWrap: "wrap",
@@ -533,7 +565,7 @@
     rowSelected: { cursor: "pointer", background: "rgba(56,139,253,0.12)" },
     name: { color: "#c9d1d9", marginLeft: 6 },
     nameDir: { color: "#58a6ff", marginLeft: 6 },
-    cb: { width: 16, height: 16, accentColor: "#58a6ff", cursor: "pointer" },
+    cb: { width: 18, height: 18, accentColor: "#58a6ff", cursor: "pointer", display: "block", margin: "0 auto" },
     opBtn: {
       background: "none", color: "#8b949e", border: "1px solid #30363d", borderRadius: 4,
       padding: "1px 8px", cursor: "pointer", fontSize: 12, marginRight: 4,
@@ -712,7 +744,10 @@
       setSelected({});
       fetchJson(API_BASE + "/ls?path=" + encodeURIComponent(path))
         .then(function (data) {
-          if (!data || data.ok === false) throw new Error((data && data.detail) || "列目录失败");
+          // 防御：entries 必须是数组，避免错误体 {detail} 混入后渲染崩溃
+          if (!data || data.ok === false || !Array.isArray(data.entries)) {
+            throw new Error((data && data.detail) || "列目录失败");
+          }
           setEntries(data);
         })
         .catch(function (err) {
@@ -783,7 +818,7 @@
         i > 0 ? h("span", { style: S.sep }, "/") : null,
         h("button", {
           style: isLast ? S.crumbActive : S.crumb,
-          onClick: function () { if (!isLast) setCurPath(target); },
+          onClick: function (ev) { ev.stopPropagation(); if (!isLast) setCurPath(target); },
           onMouseEnter: function (ev) { if (!isLast) ev.currentTarget.style.color = "#79c0ff"; },
           onMouseLeave: function (ev) { if (!isLast) ev.currentTarget.style.color = "#58a6ff"; },
         }, i === 0 && !isPlatform ? crumbRootLabel : (seg === "/" ? "⛭ /" : seg)));
@@ -911,6 +946,31 @@
       setCurPath(p);
     }
 
+    // 复制路径：优先 Clipboard API，失败回退 execCommand；
+    // 写入纯文本字符串，避免浏览器原生选中复制时在 / 前后带出换行
+    function copyPath(text) {
+      if (!text) return;
+      var done = function () { toast("已复制路径：" + text); };
+      var fallback = function () {
+        try {
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          ta.style.position = "fixed";
+          ta.style.opacity = "0";
+          document.body.appendChild(ta);
+          ta.select();
+          var ok = document.execCommand("copy");
+          document.body.removeChild(ta);
+          if (ok) done(); else toast("复制失败，请手动选择复制", true);
+        } catch (e) { toast("复制失败，请手动选择复制", true); }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } else {
+        fallback();
+      }
+    }
+
     function toggleMode() {
       var next = (rootInfo && rootInfo.mode === "platform") ? "workdir" : "platform";
       fetchJson(API_BASE + "/mode", { method: "POST", body: { mode: next } })
@@ -1009,7 +1069,7 @@
         h("td", { style: S.td }, "-"),
       ));
     }
-    (entries ? entries.entries : []).forEach(function (entry) {
+    (entries && entries.entries ? entries.entries : []).forEach(function (entry) {
       var isDir = entry.type === "dir";
       var isSel = !!selected[entry.path];
       rows.push(h("tr", {
@@ -1022,7 +1082,12 @@
         },
         title: isDir ? "点击进入" : "点击预览",
       },
-        h("td", { style: S.td },
+        h("td", {
+          style: S.td,
+          // 整个选择列单元格可点击切换选择，扩大点击热区，避免误触进入目录/预览
+          onClick: function (ev) { ev.stopPropagation(); toggleSelect(entry); },
+          title: "点击选择/取消选择",
+        },
           h("input", {
             type: "checkbox", style: S.cb, checked: isSel,
             onClick: function (ev) { ev.stopPropagation(); },
@@ -1042,6 +1107,11 @@
             style: S.opBtn,
             onClick: function (ev) { ev.stopPropagation(); confirmRename(entry); },
           }, "重命名"),
+          h("button", {
+            style: S.opBtn,
+            title: "复制该文件/文件夹的完整路径",
+            onClick: function (ev) { ev.stopPropagation(); copyPath(entry.path); },
+          }, "复制路径"),
         )));
     });
 
@@ -1156,19 +1226,22 @@
         webkitdirectory: "", directory: "",
         onChange: onPickDir,
       }),
-      h("button", {
-        style: S.btnPrimary,
-        onClick: function () { if (fileInput.current) fileInput.current.click(); },
-        disabled: uploading,
-        title: "上传文件到当前目录（支持多选，也可直接把文件/文件夹拖进窗口）",
-      }, uploading ? "⬆ 上传中…" : "⬆ 上传"),
-      h("button", {
-        style: S.btnPrimary,
-        onClick: function () { if (dirInput.current) dirInput.current.click(); },
-        disabled: uploading,
-        title: "上传整个文件夹到当前目录（保留目录结构）",
-      }, uploading ? "⬆ 上传中…" : "📁 上传文件夹"),
-      h("button", { style: S.btnPrimary, onClick: confirmNewDir }, "📁 新建文件夹"),
+      // 有对象被选中时隐藏「上传/上传文件夹/新建文件夹」，避免与删除等选择操作同时存在
+      selectedList.length === 0 ? h("span", { key: "create-group", style: { display: "inline-flex", gap: 8, alignItems: "center" } },
+        h("button", {
+          style: S.btnPrimary,
+          onClick: function () { if (fileInput.current) fileInput.current.click(); },
+          disabled: uploading,
+          title: "上传文件到当前目录（支持多选，也可直接把文件/文件夹拖进窗口）",
+        }, uploading ? "⬆ 上传中…" : "⬆ 上传"),
+        h("button", {
+          style: S.btnPrimary,
+          onClick: function () { if (dirInput.current) dirInput.current.click(); },
+          disabled: uploading,
+          title: "上传整个文件夹到当前目录（保留目录结构）",
+        }, uploading ? "⬆ 上传中…" : "📁 上传文件夹"),
+        h("button", { style: S.btnPrimary, onClick: confirmNewDir }, "📁 新建文件夹"))
+        : null,
       h("button", { style: S.btn, onClick: function () { if (curPath) fetchList(curPath); } }, "🔄 刷新"),
       h("select", {
         style: S.select,
@@ -1189,6 +1262,7 @@
         isPlatform ? "平台模式：可访问所有支持访问的路径（遵循系统权限）" : "工作区模式：仅 QwenPaw 根目录，点击「🌐 平台模式」可切换"));
 
     return h("div", {
+      id: "qfb-root",
       style: S.page,
       onDragEnter: onDragEnter,
       onDragOver: onDragOver,
@@ -1214,9 +1288,18 @@
           },
         }, "🏠 工作区"),
       ),
-      h("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid #21262d", flexShrink: 0, overflow: "hidden" } },
+      h("div", {
+        style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid #21262d", flexShrink: 0, overflow: "hidden", cursor: curPath ? "copy" : "default" },
+        title: curPath ? "点击复制当前路径" : undefined,
+        onClick: function () { if (curPath) copyPath(curPath); },
+      },
         h("span", { style: { color: "#8b949e", fontSize: 12, whiteSpace: "nowrap" } }, "路径:"),
-        h("div", { style: S.crumbRow }, crumbs.length ? crumbs : h("span", { style: { color: "#8b949e", fontSize: 12 } }, "…"))),
+        h("div", { style: S.crumbRow }, crumbs.length ? crumbs : h("span", { style: { color: "#8b949e", fontSize: 12 } }, "…")),
+        h("button", {
+          style: S.crumbCopyBtn,
+          title: "复制当前路径",
+          onClick: function (ev) { ev.stopPropagation(); if (curPath) copyPath(curPath); },
+        }, "📋 复制路径")),
       toolRow,
       h("div", { style: S.body }, body),
       h("div", { style: S.footer },

@@ -1,5 +1,17 @@
 # 变更记录 (Changelog)
 
+## v0.1.5 - 2026-08-12
+
+- **修复进入已删除文件夹导致页面崩溃**：后端对不存在的路径返回 404
+  `{"detail": "路径不存在: ..."}`（无 `ok` 字段），前端 `fetchJson` 不检查
+  HTTP 状态、`data.ok === false` 判定不成立，把错误体当作成功数据设置进
+  `entries`，渲染时 `entries.entries.forEach` 触发 TypeError 崩溃；且
+  localStorage 中的失效路径不会被清除，导致刷新/重新进入依然崩溃
+- 修复内容：`fetchJson` 非 2xx 一律抛错（解析 `detail`/`error`/`message`）；
+  `fetchList` 防御性校验 `entries` 必须为数组；渲染处对 `entries.entries`
+  增加存在性保护；保存路径失效时自动清除记录，下次刷新回到 WORKING_DIR
+- 版本号统一为 0.1.5（plugin.py / ui/index.js / plugin.json）
+
 ## v0.1.4 - 2026-08-07
 
 - **刷新保持当前位置**：当前打开的目录记入 localStorage，刷新页面后自动恢复
