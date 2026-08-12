@@ -1,5 +1,5 @@
 /**
- * QwenPaw 文件浏览器 v0.2.0 — 前端 GUI
+ * QwenPaw 文件浏览器 v0.2.1 — 前端 GUI
  * 分层级浏览/查看/下载 QwenPaw 工作区以及容器内所有可访问路径；
  * 支持上传（按钮/拖拽/整文件夹）、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
  * v0.2.0：AI 助手面板（可折叠对话，自动附带当前目录与选中文件，复用 QwenPaw agent 管线）。
@@ -19,7 +19,7 @@
 
   var PLUGIN_ID = "qwenpaw-file-browser";
   var PLUGIN_NAME = "文件浏览器";
-  var VERSION = "0.2.0";
+  var VERSION = "0.2.1";
   var API_BASE = "/api/qwenpaw-file-browser";
 
   // localStorage 键：记住上次打开的目录，刷新页面后恢复当前位置
@@ -1299,6 +1299,15 @@
       }
     }
 
+    // 在代码编辑器中打开：把目标路径写入 localStorage（同源整页跳转后仍保留），
+    // 再跳转到 code-editor 插件。code-editor 初始化时读取并删除该键。
+    // 说明：宿主 SPA 路由渲染时会重写 URL 丢弃 query，故不能用 ?file= 参数传递。
+    function openInEditor(path) {
+      if (!path) return;
+      try { localStorage.setItem("qwenpaw-code-editor:externalFile", path); } catch (e) { /* ignore */ }
+      window.location.href = "/plugin/qwenpaw-code-editor";
+    }
+
     function toggleMode() {
       var next = (rootInfo && rootInfo.mode === "platform") ? "workdir" : "platform";
       fetchJson(API_BASE + "/mode", { method: "POST", body: { mode: next } })
@@ -1428,6 +1437,12 @@
         h("td", { style: S.td },
           h("button", {
             style: S.opBtn,
+            title: isDir ? "文件夹不支持编辑" : "在代码编辑器中打开并编辑",
+            onClick: function (ev) { ev.stopPropagation(); isDir ? null : openInEditor(entry.path); },
+            disabled: isDir,
+          }, "编辑"),
+          h("button", {
+            style: S.opBtn,
             onClick: function (ev) { ev.stopPropagation(); isDir ? null : downloadOne(entry); },
             disabled: isDir,
           }, "下载"),
@@ -1495,6 +1510,11 @@
             }, preview.badge || "文本"),
             h("span", { style: { color: "#8b949e", fontSize: 12, marginLeft: "auto" } },
               fmtSize(preview.size) + (preview.truncated ? " · 已截断预览" : "")),
+            h("button", {
+              style: S.btn,
+              title: "在代码编辑器中打开并编辑",
+              onClick: function () { setPreview(null); openInEditor(preview.path); },
+            }, "✏️ 编辑"),
             h("button", { style: S.btn, onClick: function () { setPreview(null); } }, "关闭")),
           previewBody));
     } else if (previewLoading) {
