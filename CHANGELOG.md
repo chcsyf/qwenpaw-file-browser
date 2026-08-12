@@ -1,5 +1,18 @@
 # 变更记录 (Changelog)
 
+## v0.2.0 - 2026-08-12
+
+- **AI 助手面板**：工具栏新增「🤖 AI 助手」可折叠对话面板
+  - 发送消息自动附带**当前目录**与**选中的文件/文件夹**作为上下文（前端展示实时可见）
+  - 复用 QwenPaw agent 管线（`workspace.stream_query`）：同一 `session_id` 延续
+    会话历史，支持工具调用/记忆/技能，与主聊天能力一致
+  - SSE 流式渲染（`object: content` 增量事件），跳过 reasoning 思考内容只展示正式回复；
+    消息完成时用完整文本校正，保证最终内容准确
+  - 支持「⏹ 停止」中断当前回复；会话 ID 存 localStorage，刷新页面后继续同一会话
+  - 后端新增 `POST /ai/chat`（SSE），从主服务 `MultiAgentManager` 获取 workspace，
+    非 QwenPaw 环境返回 503 明确提示
+- 版本号统一为 0.2.0（plugin.py / ui/index.js / plugin.json / README）
+
 ## v0.1.5 - 2026-08-12
 
 - **修复进入已删除文件夹导致页面崩溃**：后端对不存在的路径返回 404

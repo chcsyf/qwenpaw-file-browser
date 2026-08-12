@@ -1,8 +1,8 @@
-# 📁 文件浏览器 (qwenpaw-file-browser) v0.1.5
+# 📁 文件浏览器 (qwenpaw-file-browser) v0.2.0
 
 QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、上传、下载文件与目录，自动识别运行环境（qwenpaw-agentscope-platform 平台 / 本地部署），平台与本地通用。采用 [Apache License 2.0](LICENSE) 许可协议发布。
 
-## 功能（v0.1.5）
+## 功能（v0.2.0）
 
 - 📂 **分层级浏览目录**：图标 / 名称 / 大小 / 修改时间 / 绝对路径
 - 🧭 **刷新保持当前位置**：当前打开的目录记入 localStorage，刷新页面后自动
@@ -37,6 +37,10 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
 - ⬇️ **下载**：任意文件（二进制安全，附件方式）
 - 🔄 **一键刷新**当前目录
 - 🎨 **视觉一致**：滚动条样式与 QwenPaw 控制台暗色主题对齐
+- 🤖 **AI 助手**：工具栏「🤖 AI 助手」展开可折叠对话面板
+  - 发送消息自动附带**当前目录**与**选中文件/文件夹**作为上下文（可看到面板提示）
+  - 复用 QwenPaw agent 管线（工具调用/记忆/技能与主聊天一致），SSE 流式渲染，
+    支持「⏹ 停止」中断；会话 ID 持久化，刷新后继续同一对话
 - 🛡️ **安全**：工作区模式越界拦截；删除保护（禁止删除 `/`、主目录、QwenPaw 数据根目录）；
   写操作遵循系统权限，权限不足返回明确错误
 
@@ -59,6 +63,7 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
 | POST | `/api/qwenpaw-file-browser/delete` | 删除 `{"path": "...", "recursive": false}`（目录递归需显式 true） |
 | POST | `/api/qwenpaw-file-browser/batch/delete` | 批量删除 `{"paths": ["..."], "recursive": false}`，返回 `deleted`/`failed` |
 | GET  | `/api/qwenpaw-file-browser/batch/download?paths=a,b,c` | 批量打包下载 zip（目录递归收集；临时文件响应后自动清理） |
+| POST | `/api/qwenpaw-file-browser/ai/chat` | AI 对话（SSE 流式）`{"text", "path", "selected": [], "session_id", "agent_id"}`，复用 QwenPaw agent 管线，自动附带当前目录与选中文件上下文 |
 | POST | `/api/qwenpaw-file-browser/mode` | 切换访问模式 `{"mode": "auto"\|"workdir"\|"platform"}`（auto = 自动识别） |
 
 ## 安装 / 升级

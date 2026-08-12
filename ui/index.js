@@ -1,7 +1,8 @@
 /**
- * QwenPaw 文件浏览器 v0.1.5 — 前端 GUI
+ * QwenPaw 文件浏览器 v0.2.0 — 前端 GUI
  * 分层级浏览/查看/下载 QwenPaw 工作区以及容器内所有可访问路径；
  * 支持上传（按钮/拖拽/整文件夹）、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
+ * v0.2.0：AI 助手面板（可折叠对话，自动附带当前目录与选中文件，复用 QwenPaw agent 管线）。
  * 与 web-terminal 插件同一套开发范式：React.createElement + 样式对象 + GitHub Dark。
  */
 (function () {
@@ -18,7 +19,7 @@
 
   var PLUGIN_ID = "qwenpaw-file-browser";
   var PLUGIN_NAME = "文件浏览器";
-  var VERSION = "0.1.5";
+  var VERSION = "0.2.0";
   var API_BASE = "/api/qwenpaw-file-browser";
 
   // localStorage 键：记住上次打开的目录，刷新页面后恢复当前位置
@@ -576,6 +577,38 @@
       flexShrink: 0, padding: "6px 12px", borderTop: "1px solid #21262d",
       color: "#8b949e", fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
     },
+    // --- AI 助手面板（v0.2.0） ---
+    aiPanel: {
+      position: "fixed", top: 0, right: 0, bottom: 0, width: 440, maxWidth: "92vw",
+      zIndex: 8000, display: "flex", flexDirection: "column",
+      background: "#0d1117", borderLeft: "1px solid #30363d",
+      boxShadow: "-8px 0 32px rgba(0,0,0,.4)",
+    },
+    aiHeader: {
+      display: "flex", alignItems: "center", gap: 4, padding: "8px 12px",
+      background: "#161b22", borderBottom: "1px solid #30363d", flexShrink: 0,
+    },
+    aiBody: {
+      flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px",
+      display: "flex", flexDirection: "column", gap: 8,
+    },
+    aiRowUser: { display: "flex", justifyContent: "flex-end" },
+    aiRowAi: { display: "flex", justifyContent: "flex-start" },
+    aiBubbleUser: {
+      maxWidth: "85%", background: "#1f6feb", color: "#fff",
+      borderRadius: "10px 10px 2px 10px", padding: "8px 12px", fontSize: 13,
+      whiteSpace: "pre-wrap", wordBreak: "break-word",
+    },
+    aiBubbleAi: {
+      maxWidth: "92%", background: "#161b22", color: "#c9d1d9",
+      borderRadius: "10px 10px 10px 2px", padding: "8px 12px", fontSize: 13,
+      border: "1px solid #30363d", wordBreak: "break-word",
+    },
+    aiEmpty: { color: "#8b949e", fontSize: 12, whiteSpace: "pre-line", textAlign: "center", paddingTop: 24 },
+    aiFooter: {
+      display: "flex", alignItems: "center", gap: 8, padding: "8px 12px",
+      background: "#161b22", borderTop: "1px solid #30363d", flexShrink: 0,
+    },
     overlay: {
       position: "fixed", inset: 0, background: "rgba(1,4,9,0.7)",
       display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999,
@@ -707,6 +740,173 @@
     var fileInput = React.useRef(null);     // 隐藏的文件选择框
     var dirInput = React.useRef(null);      // 隐藏的文件夹选择框（webkitdirectory）
     var dragDepth = React.useRef(0);        // 拖拽进出计数（避免子元素间移动闪烁）
+    // --- AI 辅助面板（v0.2.0） ---
+    var _aio = React.useState(false);       // AI 面板展开
+    var aiOpen = _aio[0], setAiOpen = _aio[1];
+    var _aim = React.useState([]);          // [{role:"user"|"ai", text}] 显示消息
+    var aiMsgs = _aim[0], setAiMsgs = _aim[1];
+    var _ait = React.useState("");          // AI 输入框
+    var aiInput = _ait[0], setAiInput = _ait[1];
+    var _aib = React.useState(false);       // AI 请求中
+    var aiBusy = _aib[0], setAiBusy = _aib[1];
+    var aiAbort = React.useRef(null);       // AbortController（停止按钮）
+    var aiBodyRef = React.useRef(null);     // 消息列表滚动容器
+    var aiReasoning = React.useRef(false);  // 当前是否处于思考（reasoning）流中
+
+    function aiSessionId() {
+      var k = "qwenpaw-file-browser:aiSession";
+      var v = null;
+      try { v = localStorage.getItem(k); } catch (e) { v = null; }
+      if (!v) {
+        v = "qfb-ai-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8);
+        try { localStorage.setItem(k, v); } catch (e) { /* 忽略 */ }
+      }
+      return v;
+    }
+    // 消息变化时自动滚到底部
+    React.useEffect(function () {
+      if (aiBodyRef.current) {
+        aiBodyRef.current.scrollTop = aiBodyRef.current.scrollHeight;
+      }
+    }, [aiMsgs, aiBusy]);
+
+    // AI 发送：自动附带当前路径 + 选中文件，SSE 流式渲染回复
+    function sendAi() {
+      var text = (aiInput || "").trim();
+      if (!text || aiBusy) return;
+      setAiMsgs(function (prev) { return prev.concat([{ role: "user", text: text }, { role: "ai", text: "" }]); });
+      setAiInput("");
+      setAiBusy(true);
+      var ctrl = new AbortController();
+      aiAbort.current = ctrl;
+      var selPaths = selectedList.map(function (e) { return e.path; });
+      fetch(API_BASE + "/ai/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: text,
+          path: curPath || "",
+          selected: selPaths,
+          session_id: aiSessionId(),
+        }),
+        signal: ctrl.signal,
+      }).then(function (r) {
+        if (!r.ok) {
+          return r.json().catch(function () { return {}; }).then(function (body) {
+            throw new Error((body && (body.detail || body.error || body.message)) || ("HTTP " + r.status));
+          });
+        }
+        var reader = r.body.getReader();
+        var decoder = new TextDecoder();
+        var buf = "";
+        function pump() {
+          return reader.read().then(function (res) {
+            if (res.done) return;
+            buf += decoder.decode(res.value, { stream: true });
+            var lines = buf.split("\n");
+            buf = lines.pop();
+            lines.forEach(function (line) {
+              var t = line.trim();
+              if (t.indexOf("data: ") === 0) handleAiEvent(t.slice(6).trim());
+            });
+            return pump();
+          });
+        }
+        return pump();
+      }).catch(function (err) {
+        if (err && err.name === "AbortError") return;
+        handleAiEvent(JSON.stringify({ object: "error", error: String((err && err.message) || err) }));
+      }).finally(function () {
+        setAiBusy(false);
+        aiAbort.current = null;
+      });
+    }
+
+    // 解析 QwenPaw 协议事件，增量渲染 AI 回复
+    // 事件流：response(created/in_progress) → message(reasoning) → content(delta 文本)
+    //       → message(message, completed) → response(completed, 含 output 完整文本)
+    function handleAiEvent(raw) {
+      var ev;
+      try { ev = JSON.parse(raw); } catch (e) { return; }
+      if (!ev) return;
+      if (ev.object === "error") {
+        setAiMsgs(function (prev) {
+          var next = prev.slice();
+          var last = next[next.length - 1];
+          var errText = "⚠️ " + String(ev.error || "未知错误");
+          if (last && last.role === "ai") {
+            next[next.length - 1] = { role: "ai", text: last.text ? last.text + "\n\n" + errText : errText };
+          } else {
+            next.push({ role: "ai", text: errText });
+          }
+          return next;
+        });
+        return;
+      }
+      // 消息声明：reasoning（思考）不展示，message（正式回复）开始展示
+      if (ev.object === "message") {
+        aiReasoning.current = ev.type === "reasoning";
+        if (ev.type === "message" && ev.role === "assistant" && ev.status === "completed") {
+          // 流式 delta 拼接完成后，用该消息的完整文本替换，保证最终内容准确
+          var full = "";
+          (ev.content || []).forEach(function (c) {
+            if (c && c.type === "text" && c.text) full += c.text;
+          });
+          if (full) {
+            setAiMsgs(function (prev) {
+              var next = prev.slice();
+              var last = next[next.length - 1];
+              if (last && last.role === "ai") {
+                next[next.length - 1] = { role: "ai", text: full };
+              } else {
+                next.push({ role: "ai", text: full });
+              }
+              return next;
+            });
+          }
+        }
+        return;
+      }
+      // 流式增量文本（跳过思考内容）
+      if (ev.object === "content" && ev.type === "text" && ev.text) {
+        if (aiReasoning.current) return;
+        setAiMsgs(function (prev) {
+          var next = prev.slice();
+          var last = next[next.length - 1];
+          if (last && last.role === "ai") {
+            next[next.length - 1] = { role: "ai", text: last.text + ev.text };
+          } else {
+            next.push({ role: "ai", text: ev.text });
+          }
+          return next;
+        });
+        return;
+      }
+      // 流结束：用 response.output 完整文本校正（双保险）
+      if (ev.object === "response" && ev.status === "completed" && ev.output) {
+        var fullText = "";
+        (ev.output || []).forEach(function (m) {
+          if (!m || m.type === "reasoning") return;
+          (m.content || []).forEach(function (c) {
+            if (c && c.type === "text" && c.text) fullText += c.text;
+          });
+        });
+        if (fullText) {
+          setAiMsgs(function (prev) {
+            var next = prev.slice();
+            var last = next[next.length - 1];
+            if (last && last.role === "ai" && last.text !== fullText) {
+              next[next.length - 1] = { role: "ai", text: fullText };
+            }
+            return next;
+          });
+        }
+      }
+    }
+
+    function stopAi() {
+      if (aiAbort.current) { aiAbort.current.abort(); aiAbort.current = null; }
+    }
 
     // 确保文件夹选择框启用 webkitdirectory（React 属性 + DOM 兜底）
     React.useEffect(function () {
@@ -1258,6 +1458,11 @@
           h("button", { style: S.btn, onClick: batchDownload }, "⬇ 打包下载"),
           h("button", { style: S.btnDanger, onClick: function () { confirmDelete(selectedList); } }, "🗑 删除所选"))
         : null,
+      h("button", {
+        style: aiOpen ? S.btnActive : S.btn,
+        onClick: function () { setAiOpen(!aiOpen); },
+        title: "AI 助手：在当前目录下对话（自动附带当前路径与选中文件）",
+      }, "🤖 AI 助手"),
       h("span", { style: Object.assign({}, S.toolHint, { marginLeft: "auto" }) },
         isPlatform ? "平台模式：可访问所有支持访问的路径（遵循系统权限）" : "工作区模式：仅 QwenPaw 根目录，点击「🌐 平台模式」可切换"));
 
@@ -1311,6 +1516,47 @@
           : "（手动）")),
       actionModal,
       previewModal,
+      aiOpen ? h("div", { style: S.aiPanel },
+        h("div", { style: S.aiHeader },
+          h("span", { style: { color: "#e6edf3", fontWeight: 600, fontSize: 13 } }, "🤖 AI 助手"),
+          h("span", { style: { color: "#8b949e", fontSize: 11, marginLeft: 6 } }, "自动附带当前路径与选中文件"),
+          h("button", {
+            style: Object.assign({}, S.btn, { marginLeft: "auto", padding: "2px 8px" }),
+            title: "收起",
+            onClick: function () { setAiOpen(false); },
+          }, "✕")),
+        h("div", { style: S.aiBody, ref: aiBodyRef },
+          aiMsgs.length === 0
+            ? h("div", { style: S.aiEmpty }, "与 AI 对话，发送时自动附带：\n· 当前目录\n· 选中的文件 / 文件夹")
+            : aiMsgs.map(function (m, i) {
+                if (m.role === "user") {
+                  return h("div", { key: i, style: S.aiRowUser },
+                    h("div", { style: S.aiBubbleUser }, escapeHtml(m.text)));
+                }
+                return h("div", { key: i, style: S.aiRowAi },
+                  h("div", {
+                    className: "qfb-md",
+                    style: S.aiBubbleAi,
+                    dangerouslySetInnerHTML: { __html: m.text ? renderMarkdownSafe(m.text, highlightCode) : "<span style='color:#8b949e'>…</span>" },
+                  }));
+              }),
+          aiBusy ? h("div", { style: { color: "#8b949e", fontSize: 12, padding: "4px 8px" } }, "⏳ AI 思考中…") : null),
+        h("div", { style: S.aiFooter },
+          h("input", {
+            style: Object.assign({}, S.addr, { flex: 1 }),
+            value: aiInput,
+            placeholder: aiBusy ? "正在生成回复…" : "输入问题，Enter 发送",
+            onChange: function (ev) { setAiInput(ev.currentTarget.value); },
+            onKeyDown: function (ev) { if (ev.key === "Enter" && !aiBusy) sendAi(); },
+            disabled: aiBusy,
+          }),
+          h("button", {
+            style: S.btnPrimary,
+            onClick: sendAi,
+            disabled: aiBusy || !(aiInput || "").trim(),
+          }, "发送"),
+          aiBusy ? h("button", { style: S.btnDanger, onClick: stopAi }, "⏹ 停止") : null))
+        : null,
       dragOver ? h("div", { style: S.dropOverlay },
         h("div", { style: S.dropHint }, "📥 松开鼠标，上传到当前目录" +
           (curPath ? "：" + curPath : ""))) : null);

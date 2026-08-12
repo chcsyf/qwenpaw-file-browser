@@ -1,5 +1,5 @@
 """
-QwenPaw 文件浏览器插件 v0.1.5
+QwenPaw 文件浏览器插件 v0.2.0
 浏览器窗口：分层级浏览/查看/下载 QwenPaw 工作区（QWENPAW_WORKING_DIR）以及
 （平台模式下）容器内所有可访问的路径（NAS 持久层 / 容器本地盘 /tmp /home /root
 /workspace / 系统盘只读等）。
@@ -33,20 +33,25 @@ QwenPaw 文件浏览器插件 v0.1.5
 """
 import io
 import logging
+import asyncio
+import json
+import logging
 import os
 import shutil
 import tempfile
+import uuid
 import zipfile
 from pathlib import Path
+from typing import List, Optional
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.1.5"
+PLUGIN_VERSION = "0.2.0"
 
 router = APIRouter()
 
@@ -613,6 +618,132 @@ async def batch_download(paths: str = Query("", description="逗号分隔的路�
         filename="files.zip",
         media_type="application/zip",
         background=BackgroundTask(_cleanup),
+    )
+
+
+# ---------------------------------------------------------------------------
+# AI 辅助对话（v0.2.0）
+# ---------------------------------------------------------------------------
+
+class AIChatRequest(BaseModel):
+    """AI 对话请求体。
+
+    text     用户消息正文
+    path     当前目录（自动附加为上下文）
+    selected 当前选中的文件/文件夹路径列表（自动附加为上下文）
+    session_id  会话 ID（前端持久化，同一 ID 延续 QwenPaw 会话历史）
+    agent_id    目标 agent（可选，默认 default / X-Agent-Id）
+    """
+
+    text: str
+    path: str = ""
+    selected: List[str] = []
+    session_id: str = ""
+    agent_id: str = ""
+
+
+def _build_ai_prompt(req: AIChatRequest) -> str:
+    """把当前路径 + 选中文件拼进用户提示词。"""
+    parts = []
+    if req.path:
+        parts.append(f"当前目录：{req.path}")
+    if req.selected:
+        parts.append("选中文件：\n" + "\n".join(f"  - {p}" for p in req.selected))
+    if parts:
+        parts.append("---")
+    parts.append(req.text.strip())
+    return "\n".join(parts)
+
+
+async def _get_workspace(request: Request, agent_id: str = "") -> object:
+    """从主服务拿 agent workspace（与 QwenPaw 内部路由同一获取方式）。"""
+    if not hasattr(request.app.state, "multi_agent_manager"):
+        raise HTTPException(
+            status_code=503,
+            detail="MultiAgentManager 未初始化，AI 对话不可用",
+        )
+    manager = request.app.state.multi_agent_manager
+    target = agent_id or request.headers.get("X-Agent-Id") or "default"
+    try:
+        workspace = await manager.get_agent(target)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(status_code=404, detail=f"Agent 不存在: {target}") from e
+    except Exception as e:  # noqa: BLE001
+        logger.error("[qwenpaw-file-browser] get_agent(%s) failed: %s", target, e)
+        raise HTTPException(status_code=500, detail=f"获取 Agent 失败: {e}") from e
+    if workspace is None:
+        raise HTTPException(status_code=404, detail=f"Agent 不存在: {target}")
+    return workspace
+
+
+def _serialize_event(ev: object) -> str:
+    """把 stream_query 产出的 schema 对象序列化为 SSE data 行。"""
+    try:
+        if hasattr(ev, "model_dump"):
+            payload = ev.model_dump()
+        elif isinstance(ev, dict):
+            payload = ev
+        else:
+            payload = {"object": "event", "data": str(ev)}
+    except Exception as e:  # noqa: BLE001
+        payload = {"object": "error", "error": f"序列化失败: {e}"}
+    return "data: " + json.dumps(payload, ensure_ascii=False, default=str) + "\n\n"
+
+
+@router.post("/ai/chat")
+async def ai_chat(
+    req: AIChatRequest,
+    request: Request,
+) -> StreamingResponse:
+    """AI 辅助对话（SSE 流式）。
+
+    复用 QwenPaw agent 管线（workspace.stream_query），同一 session_id 延续
+    会话历史（工具调用/记忆/技能与主聊天一致）。事件为 QwenPaw 协议对象：
+      {object: "response", status: "created"|"in_progress"|"completed"}
+      {object: "message", role: "assistant", content: [{type:"text", text}]}
+    """
+    workspace = await _get_workspace(request, req.agent_id)
+    session_id = req.session_id or ("qfb-ai-" + uuid.uuid4().hex)
+    prompt = _build_ai_prompt(req)
+
+    async def event_generator():
+        try:
+            stream_req = {
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": prompt}],
+                    }
+                ],
+                "session_id": session_id,
+                "user_id": "qwenpaw-file-browser",
+                "stream": True,
+            }
+            async for ev in workspace.stream_query(stream_req):
+                yield _serialize_event(ev)
+        except asyncio.CancelledError:
+            # 客户端断开：agent 管线内部会做清理
+            logger.info("[qwenpaw-file-browser] ai/chat cancelled (session=%s)", session_id)
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "[qwenpaw-file-browser] ai/chat error (session=%s): %s",
+                session_id,
+                e,
+                exc_info=True,
+            )
+            yield "data: " + json.dumps(
+                {"object": "error", "error": str(e)}, ensure_ascii=False
+            ) + "\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
