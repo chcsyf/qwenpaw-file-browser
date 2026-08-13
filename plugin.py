@@ -623,10 +623,25 @@ async def batch_download(paths: str = Query("", description="逗号分隔的路�
                     zf.write(p, p.name)
                 elif p.is_dir():
                     base = p.parent
-                    for f in p.rglob("*"):
-                        if f.is_file():
+                    seen: set = set()  # (st_dev, st_ino)，防符号链接循环
+                    for root, dirs, files in os.walk(p, followlinks=True):
+                        try:
+                            st = os.stat(root)
+                            key = (st.st_dev, st.st_ino)
+                        except OSError:
+                            key = None
+                        if key is not None:
+                            if key in seen:
+                                dirs[:] = []
+                                continue
+                            seen.add(key)
+                        dirs.sort()
+                        files.sort()
+                        for name in files:
+                            fp = os.path.join(root, name)
+                            rel = os.path.relpath(fp, base)
                             try:
-                                zf.write(f, str(f.relative_to(base)))
+                                zf.write(fp, rel)
                             except OSError:
                                 continue
     except Exception as e:  # noqa: BLE001
