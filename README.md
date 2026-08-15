@@ -1,12 +1,16 @@
-# 📁 文件浏览器 (qwenpaw-file-browser) v0.2.1
+# 📁 文件浏览器 (qwenpaw-file-browser) v0.2.2
 
 QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、上传、下载文件与目录，自动识别运行环境（qwenpaw-agentscope-platform 平台 / 本地部署），平台与本地通用。采用 [Apache License 2.0](LICENSE) 许可协议发布。
 
-## 功能（v0.2.1）
+## 功能（v0.2.2）
 
-- 📂 **分层级浏览目录**：图标 / 名称 / 大小 / 修改时间 / 绝对路径
+- 📂 **分层级浏览目录**：图标 / 名称 / 大小 / 修改时间 / 绝对路径；
+  **表头点击排序**（名称 / 大小 / 修改时间，再点切换升/降序 ▲▼，目录始终优先）
 - 🧭 **刷新保持当前位置**：当前打开的目录记入 localStorage，刷新页面后自动
   恢复到上次打开的位置（保存路径失效时自动清理并回退）
+- ⚡ **快捷访问**：工具栏「⚡ 快捷访问」面板列出**可访问根目录**（WORKING_DIR /
+  智能体工作区 / 系统路径 / NAS）与**用户自定义**条目；路径行「⭐ 添加到快捷访问」
+  可将当前路径加入自定义（localStorage 持久化，右侧 ✕ 可移除）
 - ⬆️ **上传文件**：多选上传到当前目录，文件名冲突自动重命名为 `name (1).ext`，流式写入
 - 📥 **拖拽上传**：把文件/文件夹直接拖入浏览器窗口即可上传到当前目录，悬停显示高亮提示
 - 📁 **上传文件夹**：一键选择整个文件夹上传，自动保留目录结构（多层子目录），同名目录自动合并、文件冲突自动重命名
@@ -16,9 +20,9 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
     `/root` `/workspace` / 系统盘 `/app` 等只读区域），遵循操作系统权限
   - 本地部署默认「工作区模式」：仅访问 QwenPaw 根目录（越界返回 400）
   - 界面提供「🌐 平台模式 / 📦 工作区模式」手动切换
-- 🤖 **快捷目录含各智能体工作区**：工作区模式下自动扫描 WORKING_DIR 下的
+- 🤖 **快捷访问含各智能体工作区**：工作区模式下自动扫描 WORKING_DIR 下的
   `workspaces/` 目录，将每个智能体的工作区以「🤖 <agent_id>（工作区）」加入
-  快捷根目录下拉，一键直达任意智能体的工作区（平台模式下同样列出）
+  快捷访问面板，一键直达任意智能体的工作区（平台模式下同样列出）
 - 📁 **文件夹操作**：新建文件夹、重命名（文件/文件夹）、删除（目录递归删除带二次确认）
 - 📋 **复制路径**：每个文件/文件夹操作区提供「复制路径」按钮（复制绝对路径到
   剪贴板，干净无附加文字）；点击文件/文件夹的路径行同样可复制，并显示复制成功提示
@@ -40,7 +44,8 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
 - 🔄 **一键刷新**当前目录
 - 🎨 **视觉一致**：滚动条样式与 QwenPaw 控制台暗色主题对齐
 - 🤖 **AI 助手**：工具栏「🤖 AI 助手」展开右下角可折叠对话面板
-  - 发送消息自动附带**当前目录**与**选中文件/文件夹**作为上下文（可看到面板提示）
+  - 发送消息自动附带**当前目录**与**选中文件/文件夹**作为上下文（空白对话框
+    背景文字有说明）
   - 复用 QwenPaw agent 管线（工具调用/记忆/技能与主聊天一致），SSE 流式渲染，
     **思考过程**灰色区块单独展示；发送/停止同一按钮切换
   - **模型选择**：面板顶部下拉可选可用大模型，选择持久化
@@ -59,7 +64,7 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET  | `/api/qwenpaw-file-browser/status` | 插件状态、版本、WORKING_DIR、当前模式（`mode`/`mode_source`/`platform_detected`）、快捷根目录列表 |
+| GET  | `/api/qwenpaw-file-browser/status` | 插件状态、版本、WORKING_DIR、当前模式（`mode`/`mode_source`/`platform_detected`）、可访问根目录列表 |
 | GET  | `/api/qwenpaw-file-browser/editor/installed` | 检测代码编辑器插件（qwenpaw-code-editor）是否已安装（供「✏️ 编辑」跳转前探测） |
 | GET  | `/api/qwenpaw-file-browser/ls?path=<dir>` | 列出目录（返回 `path`/`parent`/`entries`：name/type/size/size_h/mtime/path） |
 | GET  | `/api/qwenpaw-file-browser/read?path=<file>&max_bytes=<n>` | 预览文本文件（默认不限大小 `max_bytes=-1`；显式传 `max_bytes` 可截断；二进制返回 415） |
@@ -71,7 +76,7 @@ QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、
 | POST | `/api/qwenpaw-file-browser/batch/delete` | 批量删除 `{"paths": ["..."], "recursive": false}`，返回 `deleted`/`failed` |
 | GET  | `/api/qwenpaw-file-browser/batch/download?paths=a,b,c` | 批量打包下载 zip（目录递归收集；临时文件响应后自动清理） |
 | POST | `/api/qwenpaw-file-browser/ai/chat` | AI 对话（SSE 流式）`{"text", "path", "selected": [], "session_id", "agent_id", "model"}`，复用 QwenPaw agent 管线，自动附带当前目录与选中文件上下文；`model` 为 `"provider_id:model"` 可选切换模型 |
-| GET  | `/api/qwenpaw-file-browser/ai/models` | 可用模型列表（所有 provider 的预定义+用户添加模型），供 AI 面板下拉选择 |
+| GET  | `/api/qwenpaw-file-browser/ai/models` | 可用模型列表（仅含已配置 key 或本地/免 key 的 provider），供 AI 面板下拉选择 |
 | POST | `/api/qwenpaw-file-browser/mode` | 切换访问模式 `{"mode": "auto"\|"workdir"\|"platform"}`（auto = 自动识别） |
 
 ## 安装 / 升级

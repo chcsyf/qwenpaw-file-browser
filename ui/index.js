@@ -1,10 +1,11 @@
 /**
- * QwenPaw 文件浏览器 v0.2.1 — 前端 GUI
+ * QwenPaw 文件浏览器 v0.2.2 — 前端 GUI
  * 分层级浏览/查看/下载 QwenPaw 工作区以及容器内所有可访问路径；
  * 支持上传（按钮/拖拽/整文件夹）、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
  * v0.2.0：AI 助手面板（可折叠对话，自动附带当前目录与选中文件，复用 QwenPaw agent 管线）。
  * v0.2.1：预览弹层「✏️ 编辑」跳转代码编辑器（先探测 qwenpaw-code-editor 是否安装，
  *          未安装则提示下载到本地编辑；列表行不再显示编辑按钮）。
+ * v0.2.2：快捷访问（⭐ 添加 / ✕ 移除）、表头点击排序、AI 面板模型下拉仅显示可用、AI 头部提示精简。
  * 与 web-terminal 插件同一套开发范式：React.createElement + 样式对象 + GitHub Dark。
  */
 (function () {
@@ -21,11 +22,13 @@
 
   var PLUGIN_ID = "qwenpaw-file-browser";
   var PLUGIN_NAME = "文件浏览器";
-  var VERSION = "0.2.1";
+  var VERSION = "0.2.2";
   var API_BASE = "/api/qwenpaw-file-browser";
 
   // localStorage 键：记住上次打开的目录，刷新页面后恢复当前位置
   var LS_CUR = "qwenpaw-file-browser:curPath";
+  // localStorage 键：用户自定义快捷访问 [{path, label}]（刷新恢复）
+  var LS_QUICK_CUSTOM = "qwenpaw-file-browser:quickCustom";
 
   // fetch 封装：QwenPaw 不保证提供 QP.fetchJson，统一用原生 fetch
   function fetchJson(url, opts) {
@@ -524,6 +527,24 @@
       background: "#21262d", color: "#c9d1d9", border: "1px solid #30363d",
       borderRadius: 6, padding: "4px 8px", fontSize: 13,
     },
+    quickMenu: {
+      position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 100,
+      minWidth: 280, maxWidth: 400, maxHeight: 340, overflow: "auto",
+      background: "#161b22", border: "1px solid #30363d", borderRadius: 8,
+      boxShadow: "0 8px 24px rgba(0,0,0,.4)", padding: "6px",
+    },
+    quickGroupLabel: { color: "#8b949e", fontSize: 11, padding: "2px 6px 4px" },
+    quickItem: {
+      display: "flex", alignItems: "center", gap: 6, cursor: "pointer",
+      padding: "4px 6px", borderRadius: 6, fontSize: 13, color: "#c9d1d9",
+    },
+    quickItemLabel: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 },
+    quickRemove: {
+      background: "none", border: "none", color: "#8b949e", cursor: "pointer",
+      fontSize: 13, padding: "0 2px", flexShrink: 0, lineHeight: 1,
+    },
+    quickDivider: { borderTop: "1px solid #21262d", margin: "4px 0" },
+    quickEmpty: { color: "#8b949e", fontSize: 12, padding: "2px 6px" },
     crumbRow: {
       display: "flex", alignItems: "center", gap: 2, minWidth: 0,
       overflow: "hidden", whiteSpace: "nowrap", padding: "4px 0",
@@ -758,6 +779,42 @@
     var fileInput = React.useRef(null);     // 隐藏的文件选择框
     var dirInput = React.useRef(null);      // 隐藏的文件夹选择框（webkitdirectory）
     var dragDepth = React.useRef(0);        // 拖拽进出计数（避免子元素间移动闪烁）
+    // --- 列表排序（v0.2.2）：sortKey = name|size|mtime，sortDir = 1 升 / -1 降 ---
+    var _sk = React.useState("name");
+    var sortKey = _sk[0], setSortKey = _sk[1];
+    var _sd = React.useState(1);
+    var sortDir = _sd[0], setSortDir = _sd[1];
+    // --- 快捷访问（v0.2.2）：系统根 + 用户自定义（localStorage 持久化） ---
+    var _qo = React.useState(false);
+    var quickOpen = _qo[0], setQuickOpen = _qo[1];
+    var _qc = React.useState(function () {
+      try {
+        var v = localStorage.getItem(LS_QUICK_CUSTOM);
+        if (v) { var arr = JSON.parse(v); if (Array.isArray(arr)) return arr; }
+      } catch (e) { /* 忽略 */ }
+      return [];
+    });
+    var quickCustom = _qc[0], setQuickCustom = _qc[1];
+    function saveQuickCustom(list) {
+      setQuickCustom(list);
+      try { localStorage.setItem(LS_QUICK_CUSTOM, JSON.stringify(list)); } catch (e) { /* 忽略 */ }
+    }
+    function addToQuick(p) {
+      if (!p) return;
+      for (var i = 0; i < quickCustom.length; i++) {
+        if (quickCustom[i].path === p) { toast("已在快捷访问中：" + p); return; }
+      }
+      saveQuickCustom(quickCustom.concat([{ path: p, label: basename(p) || p }]));
+      toast("已添加到快捷访问：" + p);
+    }
+    function removeQuick(p) {
+      saveQuickCustom(quickCustom.filter(function (x) { return x.path !== p; }));
+      toast("已从快捷访问移除");
+    }
+    function toggleSort(key) {
+      if (sortKey === key) { setSortDir(-sortDir); }
+      else { setSortKey(key); setSortDir(1); }
+    }
     // --- AI 辅助面板（v0.2.0） ---
     var LS_AI_OPEN = "qwenpaw-file-browser:aiOpen";
     var LS_AI_MSGS = "qwenpaw-file-browser:aiMsgs";
@@ -1406,7 +1463,27 @@
       });
     }
 
-    // 表格行
+    // 表格行（支持按 名称/大小/修改时间 点击排序；目录始终优先，保持常见文件浏览器习惯）
+    var rowList = (entries && entries.entries ? entries.entries : []).slice();
+    if (rowList.length > 1) {
+      var sk = sortKey || "name";
+      rowList.sort(function (a, b) {
+        var ta = a.type === "dir" ? 0 : 1;
+        var tb = b.type === "dir" ? 0 : 1;
+        if (ta !== tb) return ta - tb;
+        var va = a[sk], vb = b[sk];
+        var r;
+        if (sk === "name") {
+          r = String(va == null ? "" : va).localeCompare(String(vb == null ? "" : vb), "zh");
+        } else {
+          r = (Number(va) || 0) - (Number(vb) || 0);
+        }
+        if (r === 0) {
+          r = String(a.name || "").localeCompare(String(b.name || ""), "zh");
+        }
+        return r * (sortDir || 1);
+      });
+    }
     var rows = [];
     if (entries && entries.parent !== null && entries.parent !== undefined) {
       rows.push(h("tr", {
@@ -1420,7 +1497,7 @@
         h("td", { style: S.td }, "-"),
       ));
     }
-    (entries && entries.entries ? entries.entries : []).forEach(function (entry) {
+    rowList.forEach(function (entry) {
       var isDir = entry.type === "dir";
       var isSel = !!selected[entry.path];
       rows.push(h("tr", {
@@ -1482,9 +1559,21 @@
                 type: "checkbox", style: S.cb, checked: allSelected && entries.entries.length > 0,
                 onChange: toggleAll,
               })),
-            h("th", { style: S.th }, "名称"),
-            h("th", { style: S.th, width: 90 }, "大小"),
-            h("th", { style: S.th, width: 160 }, "修改时间"),
+            h("th", {
+              style: Object.assign({}, S.th, { cursor: "pointer", userSelect: "none" }),
+              onClick: function () { toggleSort("name"); },
+              title: "点击按名称排序",
+            }, "名称" + (sortKey === "name" ? (sortDir > 0 ? " ▲" : " ▼") : "")),
+            h("th", {
+              style: Object.assign({}, S.th, { width: 90, cursor: "pointer", userSelect: "none" }),
+              onClick: function () { toggleSort("size"); },
+              title: "点击按大小排序",
+            }, "大小" + (sortKey === "size" ? (sortDir > 0 ? " ▲" : " ▼") : "")),
+            h("th", {
+              style: Object.assign({}, S.th, { width: 160, cursor: "pointer", userSelect: "none" }),
+              onClick: function () { toggleSort("mtime"); },
+              title: "点击按修改时间排序",
+            }, "修改时间" + (sortKey === "mtime" ? (sortDir > 0 ? " ▲" : " ▼") : "")),
             h("th", { style: S.th, width: 200 }, "操作"),
           )),
         h("tbody", null, rows));
@@ -1599,15 +1688,42 @@
         h("button", { style: S.btnPrimary, onClick: confirmNewDir }, "📁 新建文件夹"))
         : null,
       h("button", { style: S.btn, onClick: function () { if (curPath) fetchList(curPath); } }, "🔄 刷新"),
-      h("select", {
-        style: S.select,
-        value: "",
-        onChange: function (ev) { if (ev.target.value) jumpTo(ev.target.value); },
-      },
-        h("option", { value: "", disabled: true }, "快捷根目录…"),
-        (rootInfo && rootInfo.roots || []).map(function (r) {
-          return h("option", { key: r.path, value: r.path }, r.label);
-        })),
+      h("div", { style: { position: "relative", flexShrink: 0 } },
+        h("button", {
+          style: quickOpen ? S.btnActive : S.btn,
+          title: "快捷访问：系统根目录 + 用户自定义（路径行「⭐ 添加到快捷访问」可添加，✕ 可移除）",
+          onClick: function (ev) { ev.stopPropagation(); setQuickOpen(!quickOpen); },
+        }, "⚡ 快捷访问 ▾"),
+        quickOpen ? h("div", {
+          style: S.quickMenu,
+          onClick: function (ev) { ev.stopPropagation(); },
+        },
+          h("div", { style: S.quickGroupLabel }, "可访问根目录"),
+          (rootInfo && rootInfo.roots || []).map(function (r) {
+            return h("div", { key: "root-" + r.path, style: S.quickItem,
+              title: r.path,
+              onClick: function (ev) { ev.stopPropagation(); setQuickOpen(false); jumpTo(r.path); } },
+              h("span", { style: S.quickItemLabel }, "📁 " + (r.label || r.path)));
+          }),
+          (rootInfo && rootInfo.roots || []).length === 0
+            ? h("div", { style: S.quickEmpty }, "（无）")
+            : null,
+          h("div", { style: S.quickDivider }),
+          h("div", { style: S.quickGroupLabel }, "用户自定义"),
+          quickCustom.length === 0
+            ? h("div", { style: S.quickEmpty }, "（空，路径行「⭐ 添加到快捷访问」添加）")
+            : quickCustom.map(function (q) {
+                return h("div", { key: "qc-" + q.path, style: S.quickItem,
+                  title: q.path,
+                  onClick: function (ev) { ev.stopPropagation(); setQuickOpen(false); jumpTo(q.path); } },
+                  h("span", { style: S.quickItemLabel }, "📌 " + (q.label || q.path)),
+                  h("button", {
+                    style: S.quickRemove,
+                    title: "从快捷访问移除",
+                    onClick: function (ev) { ev.stopPropagation(); removeQuick(q.path); },
+                  }, "✕"));
+              }))
+        : null),
       selectedList.length > 0 ?
         h("span", { style: { display: "inline-flex", gap: 8, alignItems: "center" } },
           h("span", { style: S.toolHint }, "已选 " + selectedList.length + " 项"),
@@ -1629,6 +1745,7 @@
       onDragOver: onDragOver,
       onDragLeave: onDragLeave,
       onDrop: onDrop,
+      onClick: function () { setQuickOpen(false); },
     },
       h("div", { style: S.header },
         h("span", { style: S.brand }, "📁 " + PLUGIN_NAME),
@@ -1660,7 +1777,12 @@
           style: S.crumbCopyBtn,
           title: "复制当前路径",
           onClick: function (ev) { ev.stopPropagation(); if (curPath) copyPath(curPath); },
-        }, "📋 复制路径")),
+        }, "📋 复制路径"),
+        h("button", {
+          style: Object.assign({}, S.crumbCopyBtn, { color: "#58a6ff" }),
+          title: "将当前路径添加到快捷访问",
+          onClick: function (ev) { ev.stopPropagation(); addToQuick(curPath); },
+        }, "⭐ 添加到快捷访问")),
       toolRow,
       h("div", { style: S.body }, body),
       h("div", { style: S.footer },
@@ -1675,7 +1797,6 @@
       aiOpen ? h("div", { style: S.aiPanel },
         h("div", { style: S.aiHeader },
           h("span", { style: { color: "#e6edf3", fontWeight: 600, fontSize: 13 } }, "🤖 AI 助手"),
-          h("span", { style: { color: "#8b949e", fontSize: 11, marginLeft: 6 } }, "自动附带当前路径与选中文件"),
           aiModels.length ? h("select", {
             style: Object.assign({}, S.aiModelSel, { marginLeft: 8 }),
             value: aiModel,

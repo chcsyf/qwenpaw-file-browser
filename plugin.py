@@ -52,7 +52,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.2.2"
 
 router = APIRouter()
 
@@ -794,11 +794,26 @@ async def ai_chat(
     )
 
 
+def _provider_usable(info) -> bool:
+    """判断 provider 是否可用（已配 key 或本地/免 key 类型）。
+
+    未提供 API key 且需要 key 的 provider（如官方预置但未配置的
+    github-models/modelscope/dashscope 等）不可用，其模型不进入下拉列表。
+    """
+    if getattr(info, "is_local", False):
+        return True
+    if getattr(info, "oauth_connected", False):
+        return True
+    if not getattr(info, "require_api_key", True):
+        return True
+    return bool(getattr(info, "api_key", "") or "")
+
+
 @router.get("/ai/models")
 async def ai_models(request: Request) -> dict:
-    """可用模型列表（供前端下拉选择）。
+    """可用模型列表（供前端下拉选择，仅含已配置 key 或本地/免 key provider）。
 
-    从主服务的 ProviderManager 收集所有 provider 的模型，
+    从主服务的 ProviderManager 收集所有可用 provider 的模型，
     返回 [{value: "provider_id:model_id", label: "provider_name / model_name"}]。
     """
     try:
@@ -812,6 +827,8 @@ async def ai_models(request: Request) -> dict:
 
     models = []
     for info in infos or []:
+        if not _provider_usable(info):
+            continue
         pid = getattr(info, "id", "") or ""
         pname = getattr(info, "name", "") or pid
         if not pid:
