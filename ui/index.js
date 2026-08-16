@@ -1956,7 +1956,7 @@
         id: PLUGIN_ID + ".menu",
         location: "primary.settings",
         label: "文件",
-        icon: function () { return h("span", { style: { fontSize: 18 } }, "📁"); },
+        icon: function () { return h("span", { className: "qwenpaw-menu-item-icon", style: { fontSize: 16 } }, "📁"); },
         route: PLUGIN_ID + ".home",
         order: 80,
       }]);
