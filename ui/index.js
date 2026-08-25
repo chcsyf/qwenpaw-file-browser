@@ -31,11 +31,49 @@
   var LS_QUICK_CUSTOM = "qwenpaw-file-browser:quickCustom";
 
   // fetch 封装：QwenPaw 不保证提供 QP.fetchJson，统一用原生 fetch
-  function fetchJson(url, opts) {
+  // 鉴权：优先走官方 host.getApiToken()（内部读 localStorage["qwenpaw_auth_token"]，
+  // 再回退构建期 TOKEN 常量），host 未就绪时直接兜底读 localStorage。
+  // 修复 QWENPAW_AUTH_ENABLED=true 时（非 loopback 客户端）所有插件接口 401 的问题：
+  // 控制台自带 bundle 会走 host.fetch()/gs() 自动带 token，这里原先的裸 fetch 完全绕过了它。
+  function getAuthToken() {
+    try {
+      if (window.QwenPaw && window.QwenPaw.host && typeof window.QwenPaw.host.getApiToken === "function") {
+        var t = window.QwenPaw.host.getApiToken();
+        if (t) return t;
+      }
+      return (window.localStorage && window.localStorage.getItem("qwenpaw_auth_token")) || "";
+    } catch (e) { return ""; }
+  }
+
+  // 合并鉴权头与自定义头（Authorization 优先，自定义头可覆盖）
+  function mergeAuthHeaders(extra) {
+    var headers = {};
+    var tok = getAuthToken();
+    if (tok) headers["Authorization"] = "Bearer " + tok;
+    if (extra) {
+      for (var k in extra) {
+        if (Object.prototype.hasOwnProperty.call(extra, k)) headers[k] = extra[k];
+      }
+    }
+    return Object.keys(headers).length ? headers : undefined;
+  }
+
+  // 带鉴权的原生 fetch（不自动 JSON 序列化），用于文件上传/下载等场景
+  function fetchWithAuth(url, opts) {
     var o = opts || {};
     return fetch(url, {
       method: o.method || "GET",
-      headers: o.body ? { "Content-Type": "application/json" } : undefined,
+      headers: mergeAuthHeaders(o.headers),
+      body: o.body,
+    });
+  }
+
+  function fetchJson(url, opts) {
+    var o = opts || {};
+    var headers = o.body ? { "Content-Type": "application/json" } : undefined;
+    return fetchWithAuth(url, {
+      method: o.method || "GET",
+      headers: headers,
       body: o.body ? JSON.stringify(o.body) : undefined,
     }).then(function (r) {
       // 非 2xx 一律抛错：后端错误体是 {"detail": "..."}（无 ok 字段），
@@ -909,7 +947,7 @@
       var selPaths = selectedList.map(function (e) { return e.path; });
       fetch(API_BASE + "/ai/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: mergeAuthHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           text: text,
           path: curPath || "",
@@ -1247,24 +1285,38 @@
     }
 
     function downloadOne(entry) {
-      var a = document.createElement("a");
-      a.href = API_BASE + "/download?path=" + encodeURIComponent(entry.path);
-      a.download = entry.name;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      toast("开始下载 " + entry.name);
+      var url = API_BASE + "/download?path=" + encodeURIComponent(entry.path);
+      fetchWithAuth(url).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.blob();
+      }).then(function (blob) {
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = entry.name;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+        toast("开始下载 " + entry.name);
+      }).catch(function (err) { toast("下载失败：" + err.message, true); });
     }
 
     function batchDownload() {
       if (!selectedList.length) return;
-      var a = document.createElement("a");
-      a.href = API_BASE + "/batch/download?paths=" + encodeURIComponent(selectedList.map(function (x) { return x.path; }).join(","));
-      a.download = "files.zip";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      toast("正在打包下载 " + selectedList.length + " 项…");
+      var url = API_BASE + "/batch/download?paths=" + encodeURIComponent(selectedList.map(function (x) { return x.path; }).join(","));
+      fetchWithAuth(url).then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.blob();
+      }).then(function (blob) {
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "files.zip";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+        toast("正在打包下载 " + selectedList.length + " 项…");
+      }).catch(function (err) { toast("打包下载失败：" + err.message, true); });
     }
 
     function confirmNewDir() { setModal({ type: "newdir" }); }
@@ -1411,7 +1463,8 @@
         var rel = f._relPath || f.webkitRelativePath || f.name;
         fd.append("files", f, rel);
       });
-      fetch(API_BASE + "/upload?path=" + encodeURIComponent(curPath), { method: "POST", body: fd })
+      // 不要手动设置 Content-Type（boundary 由浏览器自动生成）
+      fetch(API_BASE + "/upload?path=" + encodeURIComponent(curPath), { method: "POST", body: fd, headers: mergeAuthHeaders() })
         .then(function (r) { return r.json(); })
         .then(function (data) {
           if (!data || data.ok === false) throw new Error((data && data.detail) || "上传失败");
