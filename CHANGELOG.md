@@ -1,5 +1,16 @@
 # 变更记录 (Changelog)
 
+## v0.2.3 - 2026-08-25
+
+- **修复鉴权**：修复 QwenPaw `AuthMiddleware` 开启（`QWENPAW_AUTH_ENABLED=true`）且客户端 IP 不在
+  `security.allow_no_auth_hosts`（如反代 / 非 loopback）时，插件全部接口返回 401 的 bug。
+  根因是前端 `fetchJson()` 与下载请求未携带 Bearer token，绕过了平台鉴权。现通过
+  `getAuthToken()`（优先 `host.getApiToken()`，回退 `localStorage["qwenpaw_auth_token"]`）统一注入
+  `Authorization: Bearer <token>`，覆盖 JSON 接口、AI 聊天（fetch + ReadableStream）、上传、下载。
+- **支持带 token 的文件下载**：单个 / 批量下载由 `<a href>` 跳转改为 `fetch` 携带 token 取 blob 后
+  触发下载（`<a href>` 无法携带 Authorization 头，鉴权开启时下载必 401）；`URL.revokeObjectURL` 及时释放。
+- 版本号统一为 0.2.3（plugin.py / plugin.json / README / ui/index.js）
+
 ## v0.2.2 - 2026-08-15
 
 - **快捷访问**：路径行新增「⭐ 添加到快捷访问」按钮（将当前路径加入快捷访问，
