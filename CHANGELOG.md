@@ -1,5 +1,15 @@
 # 变更记录 (Changelog)
 
+## v0.2.4 - 2026-09-17
+
+- **修复：7 个文件 I/O 处理器阻塞事件循环**
+  - 受影响：`/ls`、`/read`、`/download`、`/upload`、`/mkdir`、`/rename`、`/delete`、
+    `/batch/delete`、`/batch/download` —— `iterdir`/`stat`/`read_bytes`/`write`/`copyfileobj`/
+    `rmtree`/`os.walk`+`zipfile` 全是阻塞式 I/O，工作区在 NAS/NFS 上时单次可达数秒至数十秒。
+  - 修复：这些处理器由 `async def` 改为**同步 `def`** —— FastAPI 会自动把它们丢到线程池执行，
+    不再占用事件循环线程（这些处理器均无 `await` 依赖，改动等价且更彻底）。
+  - 保留 `async def` 的仅 `/ai/chat`、`/ai/models`（需要 `await` 做流式转发）。
+
 ## v0.2.3 - 2026-08-25
 
 - **修复鉴权**：修复 QwenPaw `AuthMiddleware` 开启（`QWENPAW_AUTH_ENABLED=true`）且客户端 IP 不在

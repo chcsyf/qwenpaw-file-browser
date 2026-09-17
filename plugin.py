@@ -52,7 +52,7 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-PLUGIN_VERSION = "0.2.3"
+PLUGIN_VERSION = "0.2.4"
 
 router = APIRouter()
 
@@ -270,6 +270,11 @@ def _mode_info() -> dict:
 
 
 # ---------- 接口 ----------
+#
+# 约定：凡是要做文件 I/O 的处理器一律用**同步 def**（FastAPI 会自动把它们丢到
+# 线程池执行）；禁止用 async def 直接做阻塞式文件 I/O —— 那会在事件循环线程上跑，
+# 冻结整个 QwenPaw 服务（工作区在 NAS/NFS 上时尤其明显）。
+# 只有需要 await 的处理器（如 /ai/chat 的流式转发）才写 async def。
 @router.get("/status")
 async def status():
     wd = _working_dir().resolve()
@@ -326,7 +331,10 @@ async def set_mode(req: ModeReq):
 
 
 @router.get("/ls")
-async def ls(path: str = Query("", description="目录路径（绝对或相对 WORKING_DIR，空 = WORKING_DIR）")):
+def ls(path: str = Query("", description="目录路径（绝对或相对 WORKING_DIR，空 = WORKING_DIR）")):
+    # 故意保持同步 def：目录遍历 + 逐项 stat 是阻塞式文件 I/O（NAS/NFS 上可能阻塞数秒）。
+    # FastAPI 会把同步处理器丢到线程池执行，因此不会阻塞事件循环；
+    # 若写成 async def，这些 I/O 会直接在事件循环线程上跑，冻结整个 QwenPaw 服务。
     p = _resolve(path)
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"路径不存在: {p}")
@@ -374,10 +382,12 @@ async def ls(path: str = Query("", description="目录路径（绝对或相对 W
 
 
 @router.get("/read")
-async def read_file(
+def read_file(
     path: str = Query("", description="文件路径（绝对或相对）"),
     max_bytes: int = Query(_READ_MAX_BYTES, ge=-1, description="预览上限字节数，-1 = 不限制"),
 ):
+    # 故意保持同步 def：p.read_bytes() 是阻塞式文件 I/O（大文件 / NAS/NFS 上更明显），
+    # 交给 FastAPI 线程池执行，避免阻塞事件循环。
     p = _resolve(path)
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"路径不存在: {p}")
@@ -425,7 +435,7 @@ async def read_file(
 
 
 @router.get("/download")
-async def download(path: str = Query("", description="文件路径（绝对或相对）")):
+def download(path: str = Query("", description="文件路径（绝对或相对）")):
     p = _resolve(path)
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"路径不存在: {p}")
@@ -435,10 +445,12 @@ async def download(path: str = Query("", description="文件路径（绝对或�
 
 
 @router.post("/upload")
-async def upload(
+def upload(
     path: str = Query("", description="目标目录（绝对或相对 WORKING_DIR，空 = WORKING_DIR）"),
     files: list[UploadFile] | None = File(default=None),
 ):
+    # 故意保持同步 def：写盘（shutil.copyfileobj）是阻塞式文件 I/O，
+    # 由 FastAPI 线程池执行，避免阻塞事件循环。
     p = _resolve(path)
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"路径不存在: {p}")
@@ -511,7 +523,7 @@ async def upload(
 
 
 @router.post("/mkdir")
-async def mkdir(req: MkdirReq):
+def mkdir(req: MkdirReq):
     p = _resolve(req.path)
     if p.exists():
         raise HTTPException(status_code=400, detail=f"路径已存在: {p}")
@@ -525,7 +537,7 @@ async def mkdir(req: MkdirReq):
 
 
 @router.post("/rename")
-async def rename(req: RenameReq):
+def rename(req: RenameReq):
     new_name = (req.new_name or "").strip()
     if not new_name or "/" in new_name or "\\" in new_name:
         raise HTTPException(status_code=400, detail="新名称不能为空且不能包含路径分隔符")
@@ -545,7 +557,9 @@ async def rename(req: RenameReq):
 
 
 @router.post("/delete")
-async def delete(req: DeleteReq):
+def delete(req: DeleteReq):
+    # 故意保持同步 def：rmtree 是阻塞式文件 I/O（NAS/NFS 上可能很慢），
+    # 由 FastAPI 线程池执行，避免阻塞事件循环。
     p = _resolve(req.path)
     if not p.exists():
         raise HTTPException(status_code=404, detail=f"路径不存在: {p}")
@@ -570,7 +584,8 @@ async def delete(req: DeleteReq):
 
 
 @router.post("/batch/delete")
-async def batch_delete(req: BatchDeleteReq):
+def batch_delete(req: BatchDeleteReq):
+    # 故意保持同步 def：批量 rmtree 是阻塞式文件 I/O，由 FastAPI 线程池执行。
     if not req.paths:
         raise HTTPException(status_code=400, detail="paths 不能为空")
     deleted, failed = [], []
@@ -600,7 +615,9 @@ async def batch_delete(req: BatchDeleteReq):
 
 
 @router.get("/batch/download")
-async def batch_download(paths: str = Query("", description="逗号分隔的路径列表（目录递归收集）")):
+def batch_download(paths: str = Query("", description="逗号分隔的路径列表（目录递归收集）")):
+    # 故意保持同步 def：zipfile 打包 + os.walk 递归是阻塞式文件 I/O（大目录/NAS 上可能
+    # 数十秒），交给 FastAPI 线程池执行，避免阻塞事件循环。
     plist = [x for x in (paths or "").split(",") if x.strip()]
     if not plist:
         raise HTTPException(status_code=400, detail="paths 不能为空")

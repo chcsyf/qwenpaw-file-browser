@@ -22,7 +22,7 @@
 
   var PLUGIN_ID = "qwenpaw-file-browser";
   var PLUGIN_NAME = "文件浏览器";
-  var VERSION = "0.2.3";
+  var VERSION = "0.2.4";
   var API_BASE = "/api/qwenpaw-file-browser";
 
   // localStorage 键：记住上次打开的目录，刷新页面后恢复当前位置

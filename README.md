@@ -1,4 +1,4 @@
-# 📁 文件浏览器 (qwenpaw-file-browser) v0.2.3
+# 📁 文件浏览器 (qwenpaw-file-browser) v0.2.4
 
 QwenPaw 文件浏览器插件：在 QwenPaw 界面里分层级浏览、查看、上传、下载文件与目录，自动识别运行环境（qwenpaw-agentscope-platform 平台 / 本地部署），平台与本地通用。采用 [Apache License 2.0](LICENSE) 许可协议发布。
 
