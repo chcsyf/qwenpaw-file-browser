@@ -1997,7 +1997,6 @@
         label: PLUGIN_NAME,
         icon: "📁",
       }]);
-      console.info("[qwenpaw-file-browser] registered via registerRoutes");
     } catch (err) {
       console.warn("[qwenpaw-file-browser] registerRoutes failed:", err);
     }
@@ -2013,7 +2012,6 @@
         route: PLUGIN_ID + ".home",
         order: 80,
       }]);
-      console.info("[qwenpaw-file-browser] registered via menu.add");
     } catch (err) {
       console.warn("[qwenpaw-file-browser] menu.add failed:", err);
     }
@@ -2026,7 +2024,6 @@
         path: "/plugin/qwenpaw-file-browser",
         component: FileBrowserComponent,
       }]);
-      console.info("[qwenpaw-file-browser] registered via route.add");
     } catch (err) {
       console.warn("[qwenpaw-file-browser] route.add failed:", err);
     }
