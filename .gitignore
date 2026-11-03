@@ -11,3 +11,5 @@ __pycache__/
 # ===== 系统 =====
 .DS_Store
 Thumbs.db
+.pytest_cache/
+*_TODO.md

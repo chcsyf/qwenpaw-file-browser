@@ -1,5 +1,5 @@
 /**
- * QwenPaw 文件浏览器 v0.2.3 — 前端 GUI
+ * QwenPaw 文件浏览器 v0.2.5 — 前端 GUI
  * 分层级浏览/查看/下载 QwenPaw 工作区以及容器内所有可访问路径；
  * 支持上传（按钮/拖拽/整文件夹）、新建/重命名/删除文件夹、多选批量删除、批量打包下载。
  * v0.2.0：AI 助手面板（可折叠对话，自动附带当前目录与选中文件，复用 QwenPaw agent 管线）。
@@ -22,7 +22,7 @@
 
   var PLUGIN_ID = "qwenpaw-file-browser";
   var PLUGIN_NAME = "文件浏览器";
-  var VERSION = "0.2.4";
+  var VERSION = "0.2.5";
   var API_BASE = "/api/qwenpaw-file-browser";
 
   // localStorage 键：记住上次打开的目录，刷新页面后恢复当前位置
@@ -65,6 +65,7 @@
       method: o.method || "GET",
       headers: mergeAuthHeaders(o.headers),
       body: o.body,
+      signal: o.signal,
     });
   }
 
@@ -87,6 +88,37 @@
         });
       }
       return r.json();
+    });
+  }
+
+  // 带进度的下载：流式读取 response.body，边收边回调 onProgress(loaded, total)。
+  // Content-Length 缺失（chunked/反代压缩）时 total=0，由 UI 显示不定进度。
+  function fetchBlobWithProgress(url, onProgress, signal) {
+    return fetchWithAuth(url, signal ? { signal: signal } : {}).then(function (r) {
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (body) {
+          var msg = (body && (body.detail || body.error || body.message)) || ("HTTP " + r.status);
+          throw new Error(msg);
+        });
+      }
+      var total = parseInt(r.headers.get("Content-Length") || "", 10);
+      if (!(total > 0)) total = 0;
+      onProgress(0, total);
+      var ctype = r.headers.get("Content-Type") || "application/octet-stream";
+      if (!r.body || typeof r.body.getReader !== "function") return r.blob();
+      var reader = r.body.getReader();
+      var chunks = [];
+      var loaded = 0;
+      function pump() {
+        return reader.read().then(function (res) {
+          if (res.done) return new Blob(chunks, { type: ctype });
+          chunks.push(res.value);
+          loaded += res.value.length;
+          onProgress(loaded, total);
+          return pump();
+        });
+      }
+      return pump();
     });
   }
 
@@ -134,12 +166,119 @@
       .replace(/"/g, "&quot;");
   }
 
-  // 简单 HTML 清洗：仅用于外部 marked/hljs 输出（内置渲染器全程转义，无需清洗）
+  // ---------- HTML 清洗（标签/属性白名单，DOM 解析） ----------
+  // 正则清洗挡不住 <svg/onload=...>、javas&#99;ript: 这类变形。改为在 inert 的
+  // <template> 中让浏览器解析，再按白名单逐节点删除：未知标签、事件属性、style、
+  // srcdoc 等一律剥离，URL 走 scheme 白名单。
+  var SAFE_TAGS = {
+    A: 1, P: 1, BR: 1, HR: 1, STRONG: 1, B: 1, EM: 1, I: 1, U: 1, S: 1,
+    DEL: 1, INS: 1, CODE: 1, PRE: 1, BLOCKQUOTE: 1, UL: 1, OL: 1, LI: 1,
+    H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, TABLE: 1, THEAD: 1,
+    TBODY: 1, TFOOT: 1, TR: 1, TH: 1, TD: 1, IMG: 1, SPAN: 1, DIV: 1,
+    INPUT: 1, SUP: 1, SUB: 1, KBD: 1, MARK: 1, DETAILS: 1, SUMMARY: 1
+  };
+  var SAFE_ATTRS = {
+    A: { href: 1, title: 1, target: 1, rel: 1 },
+    IMG: { src: 1, alt: 1, title: 1, width: 1, height: 1 },
+    INPUT: { type: 1, checked: 1, disabled: 1 },
+    OL: { start: 1 },
+    TH: { colspan: 1, rowspan: 1, align: 1 },
+    TD: { colspan: 1, rowspan: 1, align: 1 },
+    CODE: { "class": 1 },
+    PRE: { "class": 1 },
+    SPAN: { "class": 1 },
+    DIV: { "class": 1 },
+    LI: { "class": 1 }
+  };
+
+  // URL 白名单：http(s)/mailto/tel 与相对地址；图片额外允许位图 data URL。
+  // 传入值已在 DOM 中解码（javascript&#58; → javascript:），再剔除浏览器会忽略的
+  // 控制字符/空白，防止 "java\tscript:" 之类绕过。
+  function safeUrl(raw, isImage) {
+    var value = String(raw == null ? "" : raw);
+    var probe = value
+      .replace(/[\u0000-\u0020\u007f-\u009f\u00a0\u1680\u2000-\u200f\u2028-\u202f\u205f\u3000\ufeff]/g, "")
+      .toLowerCase();
+    if (!probe) return "";
+    var m = /^([a-z][a-z0-9+.-]*):/.exec(probe);
+    if (!m) return value; // 相对路径 / 锚点 / 查询串
+    var scheme = m[1];
+    if (scheme === "http" || scheme === "https" || scheme === "mailto" || scheme === "tel") {
+      return value;
+    }
+    if (isImage && scheme === "data" &&
+      /^data:image\/(?:png|jpe?g|gif|webp|bmp|avif);base64,[a-z0-9+/=]+$/i.test(probe)) {
+      return value;
+    }
+    return "";
+  }
+
   function sanitizeHtml(html) {
-    return String(html)
-      .replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
-      .replace(/(href|src)\s*=\s*("|')javascript:[^"']*\2/gi, "");
+    var src = String(html == null ? "" : html);
+    if (typeof document === "undefined" || !document.createElement) {
+      return escapeHtml(src);
+    }
+    var tpl = document.createElement("template");
+    if (!tpl || !("content" in tpl)) return escapeHtml(src);
+    tpl.innerHTML = src;
+
+    var nodes = tpl.content.querySelectorAll("*");
+    for (var i = nodes.length - 1; i >= 0; i--) {
+      var el = nodes[i];
+      var tag = el.tagName;
+      if (!SAFE_TAGS[tag]) {
+        if (el.parentNode) el.parentNode.removeChild(el);
+        continue;
+      }
+      var allowed = SAFE_ATTRS[tag] || {};
+      var names = [];
+      for (var j = 0; j < el.attributes.length; j++) names.push(el.attributes[j].name);
+      for (var k = 0; k < names.length; k++) {
+        var name = names[k].toLowerCase();
+        if (!allowed[name]) {
+          el.removeAttribute(names[k]);
+          continue;
+        }
+        var value = el.getAttribute(name) || "";
+        if (name === "href" || name === "src") {
+          if (!safeUrl(value, name === "src" && tag === "IMG")) el.removeAttribute(name);
+        } else if (name === "class") {
+          var cls = value.replace(/[^A-Za-z0-9_\-\s]/g, "").trim();
+          if (cls) el.setAttribute("class", cls); else el.removeAttribute("class");
+        } else if (name === "target") {
+          if (value !== "_blank") el.removeAttribute("target");
+        } else if (name === "align") {
+          if (!/^(left|right|center)$/i.test(value)) el.removeAttribute("align");
+        } else if (name === "colspan" || name === "rowspan" ||
+          name === "width" || name === "height" || name === "start") {
+          if (!/^\d{1,4}$/.test(value)) el.removeAttribute(name);
+        }
+      }
+      if (tag === "A") {
+        if (el.getAttribute("href")) {
+          el.setAttribute("target", "_blank");
+          el.setAttribute("rel", "noopener noreferrer");
+        } else {
+          el.removeAttribute("target");
+          el.removeAttribute("rel");
+        }
+      } else if (tag === "IMG") {
+        if (!el.getAttribute("src")) {
+          if (el.parentNode) el.parentNode.removeChild(el);
+          continue;
+        }
+        el.setAttribute("referrerpolicy", "no-referrer");
+        el.setAttribute("loading", "lazy");
+      } else if (tag === "INPUT") {
+        if ((el.getAttribute("type") || "").toLowerCase() !== "checkbox") {
+          if (el.parentNode) el.parentNode.removeChild(el);
+          continue;
+        }
+        el.setAttribute("type", "checkbox");
+        el.setAttribute("disabled", "");
+      }
+    }
+    return tpl.innerHTML;
   }
 
   // 内置语法高亮（GitHub Dark token 配色，class 前缀 qfb-tok-）
@@ -250,23 +389,33 @@
   function inlineMd(src) {
     var s = escapeHtml(String(src));
     var codes = [];
+    var embeds = [];
     s = s.replace(/`([^`]+)`/g, function (_, c) {
       codes.push('<code class="qfb-md-ic">' + c + "</code>");
       return "\u0000" + (codes.length - 1) + "\u0000";
     });
+    // 链接/图片先替换成占位符，避免后续斜体/粗体规则改写标签属性
+    // （例如 URL 中的下划线会被 _..._ 规则误伤，甚至破坏 href/target）
     s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
       function (_, alt, url) {
-        return '<img src="' + escapeHtml(url) + '" alt="' + escapeHtml(alt) + '">';
+        var u = safeUrl(url, true);
+        if (!u) return alt; // 不安全的图片 URL：降级为替代文本
+        embeds.push('<img src="' + u + '" alt="' + alt + '" loading="lazy" referrerpolicy="no-referrer">');
+        return "\u0001" + (embeds.length - 1) + "\u0001";
       });
     s = s.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
       function (_, t, url) {
-        return '<a href="' + escapeHtml(url) + '" target="_blank" rel="noopener">' + inlineMd(t) + "</a>";
+        var u = safeUrl(url, false);
+        if (!u) return t; // 不安全的链接 scheme（javascript:/data: 等）：降级为纯文本
+        embeds.push('<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + t + "</a>");
+        return "\u0001" + (embeds.length - 1) + "\u0001";
       });
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
     s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
     s = s.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
     s = s.replace(/(^|[^_])_([^_\n]+)_([^_]|$)/g, "$1<em>$2</em>$3");
+    s = s.replace(/\u0001(\d+)\u0001/g, function (_, d) { return embeds[+d]; });
     s = s.replace(/\u0000(\d+)\u0000/g, function (_, d) { return codes[+d]; });
     return s;
   }
@@ -527,6 +676,18 @@
   }
   injectScrollbarStyle();
 
+  // 传输进度条样式（@keyframes 只能靠样式表，不能写在 style 对象里）
+  function ensureProgressStyle() {
+    if (document.getElementById("qfb-progress-style")) return;
+    var st = document.createElement("style");
+    st.id = "qfb-progress-style";
+    st.textContent =
+      "@keyframes qfb-indet{0%{transform:translateX(-110%)}100%{transform:translateX(320%)}}" +
+      ".qfb-progress-bar{transition:width .18s linear;}";
+    document.head.appendChild(st);
+  }
+  ensureProgressStyle();
+
   // ---------- 样式 ----------
   var S = {
     page: {
@@ -535,7 +696,7 @@
       fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif",
     },
     header: {
-      display: "flex", alignItems: "center", gap: 8, padding: "8px 12px",
+      display: "flex", alignItems: "center", gap: 8, padding: "8px 76px 8px 12px",
       background: "#161b22", borderBottom: "1px solid #30363d", flexShrink: 0, flexWrap: "wrap",
     },
     brand: { color: "#e6edf3", fontWeight: 600, whiteSpace: "nowrap" },
@@ -546,19 +707,19 @@
     },
     btn: {
       background: "#21262d", color: "#c9d1d9", border: "1px solid #30363d",
-      borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: 13, whiteSpace: "nowrap",
+      borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: 11, whiteSpace: "nowrap",
     },
     btnPrimary: {
       background: "#238636", color: "#fff", border: "1px solid #2ea043",
-      borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: 13, whiteSpace: "nowrap",
+      borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: 11, whiteSpace: "nowrap",
     },
     btnActive: {
       background: "#1f6feb", color: "#fff", border: "1px solid #58a6ff",
-      borderRadius: 6, padding: "4px 10px", cursor: "default", fontSize: 13, whiteSpace: "nowrap",
+      borderRadius: 6, padding: "4px 10px", cursor: "default", fontSize: 11, whiteSpace: "nowrap",
     },
     btnDanger: {
       background: "#da3633", color: "#fff", border: "1px solid #f85149",
-      borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: 13, whiteSpace: "nowrap",
+      borderRadius: 6, padding: "4px 10px", cursor: "pointer", fontSize: 11, whiteSpace: "nowrap",
     },
     btnDisabled: { opacity: 0.5, cursor: "not-allowed" },
     select: {
@@ -566,7 +727,7 @@
       borderRadius: 6, padding: "4px 8px", fontSize: 13,
     },
     quickMenu: {
-      position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 100,
+      position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 100,
       minWidth: 280, maxWidth: 400, maxHeight: 340, overflow: "auto",
       background: "#161b22", border: "1px solid #30363d", borderRadius: 8,
       boxShadow: "0 8px 24px rgba(0,0,0,.4)", padding: "6px",
@@ -579,28 +740,43 @@
     quickItemLabel: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 },
     quickRemove: {
       background: "none", border: "none", color: "#8b949e", cursor: "pointer",
-      fontSize: 13, padding: "0 2px", flexShrink: 0, lineHeight: 1,
+      fontSize: 11, padding: "0 2px", flexShrink: 0, lineHeight: 1,
     },
     quickDivider: { borderTop: "1px solid #21262d", margin: "4px 0" },
     quickEmpty: { color: "#8b949e", fontSize: 12, padding: "2px 6px" },
     crumbRow: {
-      display: "flex", alignItems: "center", gap: 2, minWidth: 0,
+      display: "flex", alignItems: "center", gap: 2, minWidth: 0, flex: "0 1 auto",
       overflow: "hidden", whiteSpace: "nowrap", padding: "4px 0",
     },
     crumb: {
       color: "#58a6ff", cursor: "pointer", background: "none", border: "none",
-      padding: "2px 4px", fontSize: 13, borderRadius: 4,
+      padding: "2px 4px", fontSize: 11, borderRadius: 4,
     },
     crumbActive: {
       color: "#e6edf3", cursor: "default", background: "none", border: "none",
-      padding: "2px 4px", fontSize: 13, borderRadius: 4,
+      padding: "2px 4px", fontSize: 11, borderRadius: 4,
     },
     sep: { color: "#484f58", margin: "0 1px" },
     crumbCopyBtn: {
       color: "#8b949e", cursor: "pointer", background: "#21262d",
       border: "1px solid #30363d", borderRadius: 4, padding: "2px 8px",
-      fontSize: 12, whiteSpace: "nowrap", flexShrink: 0,
+      fontSize: 11, whiteSpace: "nowrap", flexShrink: 0,
     },
+    rootBtn: {
+      color: "#58a6ff", cursor: "pointer", background: "#21262d",
+      border: "1px solid #30363d", borderRadius: 4, padding: "2px 8px",
+      fontSize: 11, whiteSpace: "nowrap", flexShrink: 0,
+    },
+    rootMenu: {
+      position: "absolute", top: "100%", left: 0, marginTop: 4, zIndex: 100,
+      minWidth: 120, background: "#161b22", border: "1px solid #30363d",
+      borderRadius: 6, boxShadow: "0 8px 24px rgba(0,0,0,.4)", padding: 4,
+    },
+    rootMenuItem: {
+      padding: "4px 8px", borderRadius: 4, cursor: "pointer",
+      fontSize: 11, color: "#c9d1d9", whiteSpace: "nowrap",
+    },
+    rootMenuItemActive: { color: "#58a6ff", background: "rgba(56,139,253,0.12)" },
     toolRow: {
       display: "flex", alignItems: "center", gap: 8, padding: "6px 12px",
       background: "#0d1117", borderBottom: "1px solid #21262d", flexShrink: 0, flexWrap: "wrap",
@@ -630,13 +806,35 @@
     cb: { width: 18, height: 18, accentColor: "#58a6ff", cursor: "pointer", display: "block", margin: "0 auto" },
     opBtn: {
       background: "none", color: "#8b949e", border: "1px solid #30363d", borderRadius: 4,
-      padding: "1px 8px", cursor: "pointer", fontSize: 12, marginRight: 4,
+      padding: "1px 8px", cursor: "pointer", fontSize: 11, marginRight: 4,
     },
     empty: { padding: 48, textAlign: "center", color: "#8b949e" },
     loading: { padding: 24, textAlign: "center", color: "#8b949e" },
     footer: {
       flexShrink: 0, padding: "6px 12px", borderTop: "1px solid #21262d",
       color: "#8b949e", fontSize: 12, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+    },
+    // --- 传输进度（v0.2.6） ---
+    progressBox: {
+      position: "fixed", left: 16, bottom: 16, width: 340, maxWidth: "92vw", zIndex: 9999,
+      background: "#161b22", border: "1px solid #30363d", borderRadius: 8,
+      boxShadow: "0 8px 24px rgba(0,0,0,.45)", padding: "10px 12px",
+    },
+    progressHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
+    progressTitle: {
+      color: "#e6edf3", fontSize: 12.5, fontWeight: 600, flex: 1,
+      overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+    },
+    progressState: { color: "#8b949e", fontSize: 11.5, whiteSpace: "nowrap" },
+    progressCancel: {
+      background: "none", color: "#8b949e", border: "1px solid #30363d", borderRadius: 4,
+      padding: "1px 8px", cursor: "pointer", fontSize: 11, whiteSpace: "nowrap",
+    },
+    progressTrack: { position: "relative", height: 6, background: "#010409", borderRadius: 3, overflow: "hidden" },
+    progressBar: { position: "absolute", left: 0, top: 0, bottom: 0, borderRadius: 3 },
+    progressInfo: {
+      display: "flex", justifyContent: "space-between", gap: 8, marginTop: 6,
+      color: "#8b949e", fontSize: 11,
     },
     // --- AI 助手面板（v0.2.0） ---
     aiPanel: {
@@ -743,7 +941,13 @@
   function collectDropItems(dataTransfer, cb) {
     var files = [];
     var pending = 0;
-    var finish = function () { cb(files); };
+    var finished = false;
+    var finish = function () {
+      // 只回调一次：错误回调与最后一批 readEntries 可能同时到达
+      if (finished) return;
+      finished = true;
+      cb(files);
+    };
     var items = dataTransfer && dataTransfer.items;
     var firstEntry = items && items.length && items[0].webkitGetAsEntry
       ? items[0].webkitGetAsEntry()
@@ -780,7 +984,8 @@
         pending++;
         readBatch();
       } else {
-        if (--pending === 0) finish();
+        // 未知 entry 类型：不参与计数（此处若 --pending 会让计数变负，导致永不完成）
+        return;
       }
     };
     for (var j = 0; j < items.length; j++) {
@@ -812,6 +1017,11 @@
     var addr = _a[0], setAddr = _a[1];
     var _u = React.useState(false);         // 上传中
     var uploading = _u[0], setUploading = _u[1];
+    var _pg = React.useState(null);         // 传输进度 {kind,label,loaded,total,speed,phase,message}
+    var progress = _pg[0], setProgress = _pg[1];
+    var progressAbort = React.useRef(null); // 当前传输的取消函数
+    var progressActive = React.useRef(false);
+    var progressTick = React.useRef({ t: 0, lastT: 0, lastLoaded: 0, speed: 0 });
     var _dr = React.useState(false);        // 拖拽悬停高亮
     var dragOver = _dr[0], setDragOver = _dr[1];
     var fileInput = React.useRef(null);     // 隐藏的文件选择框
@@ -825,6 +1035,9 @@
     // --- 快捷访问（v0.2.2）：系统根 + 用户自定义（localStorage 持久化） ---
     var _qo = React.useState(false);
     var quickOpen = _qo[0], setQuickOpen = _qo[1];
+    // 路径根下拉（工作区 / 根目录）
+    var _rm = React.useState(false);
+    var rootMenuOpen = _rm[0], setRootMenuOpen = _rm[1];
     var _qc = React.useState(function () {
       try {
         var v = localStorage.getItem(LS_QUICK_CUSTOM);
@@ -840,14 +1053,14 @@
     function addToQuick(p) {
       if (!p) return;
       for (var i = 0; i < quickCustom.length; i++) {
-        if (quickCustom[i].path === p) { toast("已在快捷访问中：" + p); return; }
+        if (quickCustom[i].path === p) { toast("已在收藏中：" + p); return; }
       }
       saveQuickCustom(quickCustom.concat([{ path: p, label: basename(p) || p }]));
-      toast("已添加到快捷访问：" + p);
+      toast("已收藏：" + p);
     }
     function removeQuick(p) {
       saveQuickCustom(quickCustom.filter(function (x) { return x.path !== p; }));
-      toast("已从快捷访问移除");
+      toast("已从收藏移除");
     }
     function toggleSort(key) {
       if (sortKey === key) { setSortDir(-sortDir); }
@@ -893,9 +1106,8 @@
         .then(function (data) {
           var list = (data && data.models) || [];
           setAiModels(list);
-          // 优先用上次选择；没有则用第一个（若有）
+          // 优先用上次选择；用户没选过就用 agent 默认模型（不擅自挑第一个）
           var chosen = saved && list.some(function (m) { return m.value === saved; }) ? saved : "";
-          if (!chosen && list.length) chosen = list[0].value;
           if (chosen) { setAiModel(chosen); }
         })
         .catch(function (err) { console.error("[qwenpaw-file-browser] ai/models failed:", err); });
@@ -1181,7 +1393,7 @@
           // 工作区模式下访问越界路径：自动回到 WORKING_DIR，避免停留在不可访问路径
           if (rootInfo && rootInfo.mode === "workdir" && rootInfo.workdir && path !== rootInfo.workdir) {
             setCurPath(rootInfo.workdir);
-            toast("仅允许访问 QwenPaw 根目录，已自动返回", true);
+            toast("当前为工作区模式，无法访问根目录；可用 POST /mode 切换平台模式", true);
             return;
           }
           // 平台模式下保存的路径不可用（被删除/移动/无权限）：清除记录，避免每次刷新都失败
@@ -1203,51 +1415,37 @@
     // 当前访问模式（供面包屑/工具栏使用）
     var isPlatform = rootInfo && rootInfo.mode === "platform";
 
-    // 面包屑：工作区模式只显示 WORKING_DIR 之内的段（首段 = WORKING_DIR），
-    // 避免点击越界段（如 /、/run/csi/...）跳到不可访问路径
-    var crumbParts = [];
-    var crumbRootLabel = "⛭ /";
+    // 路径根 + 各级路径：默认「工作区」，下拉可切到「根目录」
+    var wdPath = (rootInfo && rootInfo.workdir) || "";
+    var pathRoot = "/";
+    var pathRootLabel = "根目录";
+    var pathSegs = [];
     if (curPath) {
-      if (isPlatform) {
-        if (curPath === "/") {
-          crumbParts = ["/"];
-        } else {
-          var segsP = curPath.split("/").filter(Boolean);
-          crumbParts = ["/"].concat(segsP);
-        }
+      if (wdPath && (curPath === wdPath || curPath.indexOf(wdPath + "/") === 0)) {
+        pathRoot = wdPath;
+        pathRootLabel = "工作区";
+        if (curPath !== wdPath) pathSegs = curPath.slice(wdPath.length + 1).split("/");
       } else {
-        var wd = rootInfo ? rootInfo.workdir : "";
-        crumbRootLabel = "🏠 工作区";
-        if (wd && curPath === wd) {
-          crumbParts = [wd];
-        } else if (wd && curPath.indexOf(wd + "/") === 0) {
-          crumbParts = [wd].concat(curPath.slice(wd.length + 1).split("/"));
-        } else {
-          // 防御：当前路径不在 WORKING_DIR 内，只显示 WORKING_DIR
-          crumbParts = [wd || "/"];
-        }
+        pathRoot = "/";
+        pathRootLabel = "根目录";
+        if (curPath !== "/") pathSegs = curPath.split("/").filter(Boolean);
       }
     }
-    var crumbs = crumbParts.map(function (seg, i) {
-      var isLast = i === crumbParts.length - 1;
-      var target;
-      if (isPlatform) {
-        target = "/" + crumbParts.slice(1, i + 1).join("/");
-        if (seg === "/") target = "/";
-      } else {
-        // 工作区模式：各段对应 WORKING_DIR 前缀 + 相对段
-        var wd = rootInfo ? rootInfo.workdir : "";
-        target = i === 0 ? wd : wd + "/" + crumbParts.slice(1, i + 1).join("/");
-      }
-      return h("span", { key: "c" + i, style: { display: "inline-flex", alignItems: "center" } },
-        i > 0 ? h("span", { style: S.sep }, "/") : null,
-        h("button", {
+    var crumbs = [];
+    if (!pathSegs.length) {
+      crumbs.push(h("span", { key: "sep-root", style: S.sep }, "/"));
+    } else {
+      pathSegs.forEach(function (seg, i) {
+        var isLast = i === pathSegs.length - 1;
+        var target = (pathRoot === "/" ? "" : pathRoot) + "/" + pathSegs.slice(0, i + 1).join("/");
+        crumbs.push(h("span", { key: "sep" + i, style: S.sep }, "/"));
+        crumbs.push(h("button", {
+          key: "crumb" + i,
           style: isLast ? S.crumbActive : S.crumb,
           onClick: function (ev) { ev.stopPropagation(); if (!isLast) setCurPath(target); },
-          onMouseEnter: function (ev) { if (!isLast) ev.currentTarget.style.color = "#79c0ff"; },
-          onMouseLeave: function (ev) { if (!isLast) ev.currentTarget.style.color = "#58a6ff"; },
-        }, i === 0 && !isPlatform ? crumbRootLabel : (seg === "/" ? "⛭ /" : seg)));
-    });
+        }, seg));
+      });
+    }
 
     function toggleSelect(entry) {
       var next = Object.assign({}, selected);
@@ -1284,39 +1482,145 @@
         .finally(function () { setPreviewLoading(false); });
     }
 
+    // ---------- 传输进度（v0.2.6） ----------
+    // 平台/反代带宽有限，上传/下载可能长时间等待；统一用浮层进度条展示
+    // 已传字节、百分比与速度，并支持取消。
+    function progressBegin(kind, label, total) {
+      var now = Date.now();
+      progressTick.current = { t: 0, lastT: now, lastLoaded: 0, speed: 0 };
+      progressActive.current = true;
+      setProgress({
+        kind: kind, label: label, loaded: 0, total: total > 0 ? total : 0,
+        speed: 0, phase: "preparing", message: "",
+      });
+    }
+
+    function progressUpdate(loaded, total) {
+      if (!progressActive.current) return;
+      var tick = progressTick.current;
+      var now = Date.now();
+      var dt = (now - tick.lastT) / 1000;
+      if (dt >= 0.6) {
+        tick.speed = Math.max(0, (loaded - tick.lastLoaded) / dt);
+        tick.lastLoaded = loaded;
+        tick.lastT = now;
+      }
+      var isFinal = total > 0 && loaded >= total;
+      if (!isFinal && now - tick.t < 120) return; // 降低高频 setState
+      tick.t = now;
+      setProgress(function (p) {
+        if (!p || p.phase === "done" || p.phase === "error" || p.phase === "cancelled") return p;
+        return Object.assign({}, p, {
+          loaded: loaded,
+          total: total > 0 ? total : (p.total || 0),
+          speed: tick.speed,
+          phase: "running",
+        });
+      });
+    }
+
+    function progressDone(message) {
+      progressActive.current = false;
+      progressAbort.current = null;
+      setProgress(function (p) {
+        return p ? Object.assign({}, p, {
+          loaded: p.total > 0 ? p.total : p.loaded,
+          phase: "done",
+          message: message || "完成",
+        }) : p;
+      });
+      setTimeout(function () {
+        setProgress(function (p) { return p && p.phase === "done" ? null : p; });
+      }, 1600);
+    }
+
+    function progressFail(message) {
+      progressActive.current = false;
+      progressAbort.current = null;
+      setProgress(function (p) {
+        return p ? Object.assign({}, p, { phase: "error", message: message || "失败" }) : p;
+      });
+      setTimeout(function () {
+        setProgress(function (p) { return p && p.phase === "error" ? null : p; });
+      }, 5000);
+    }
+
+    function progressCancelled() {
+      progressActive.current = false;
+      progressAbort.current = null;
+      setProgress(function (p) {
+        return p ? Object.assign({}, p, { phase: "cancelled", message: "已取消" }) : p;
+      });
+      setTimeout(function () {
+        setProgress(function (p) { return p && p.phase === "cancelled" ? null : p; });
+      }, 1600);
+    }
+
+    function progressCancel() {
+      var fn = progressAbort.current;
+      if (fn) { try { fn(); } catch (e) { /* 忽略 */ } }
+    }
+
+    function startDownload(url, filename, label) {
+      if (progressActive.current) { toast("已有传输任务进行中，请稍候", true); return; }
+      var controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
+      var cancelled = false;
+      progressAbort.current = function () { cancelled = true; if (controller) controller.abort(); };
+      progressBegin("download", label, 0);
+      fetchBlobWithProgress(url, progressUpdate, controller ? controller.signal : undefined)
+        .then(function (blob) {
+          // 取消与「流刚好读完」可能同时发生：这里兜底收尾，避免进度条卡在 100%
+          if (cancelled) { progressCancelled(); return; }
+          var a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+          progressDone("已保存 " + filename);
+          toast("下载完成：" + filename);
+        })
+        .catch(function (err) {
+          if (cancelled || (err && err.name === "AbortError")) {
+            progressCancelled();
+            toast("已取消下载");
+            return;
+          }
+          var msg = (err && err.message) || String(err);
+          progressFail(msg);
+          toast("下载失败：" + msg, true);
+        });
+    }
+
     function downloadOne(entry) {
-      var url = API_BASE + "/download?path=" + encodeURIComponent(entry.path);
-      fetchWithAuth(url).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.blob();
-      }).then(function (blob) {
-        var a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = entry.name;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
-        toast("开始下载 " + entry.name);
-      }).catch(function (err) { toast("下载失败：" + err.message, true); });
+      startDownload(
+        API_BASE + "/download?path=" + encodeURIComponent(entry.path),
+        entry.name,
+        "下载 " + entry.name
+      );
+    }
+
+    function downloadDir(entry) {
+      // 文件夹默认走打包下载（zip）
+      startDownload(
+        API_BASE + "/batch/download?paths=" + encodeURIComponent(entry.path),
+        (entry.name || "folder") + ".zip",
+        "打包下载 " + entry.name
+      );
     }
 
     function batchDownload() {
       if (!selectedList.length) return;
-      var url = API_BASE + "/batch/download?paths=" + encodeURIComponent(selectedList.map(function (x) { return x.path; }).join(","));
-      fetchWithAuth(url).then(function (r) {
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        return r.blob();
-      }).then(function (blob) {
-        var a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = "files.zip";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
-        toast("正在打包下载 " + selectedList.length + " 项…");
-      }).catch(function (err) { toast("打包下载失败：" + err.message, true); });
+      // 重复 paths 参数：文件名里带逗号也不会被拆开（后端仍兼容旧的逗号串）
+      var qs = selectedList.map(function (x) {
+        return "paths=" + encodeURIComponent(x.path);
+      }).join("&");
+      startDownload(
+        API_BASE + "/batch/download?" + qs,
+        "files.zip",
+        "打包下载 " + selectedList.length + " 项"
+      );
     }
 
     function confirmNewDir() { setModal({ type: "newdir" }); }
@@ -1456,26 +1760,68 @@
 
     function uploadFiles(fileList) {
       if (!fileList || !fileList.length || !curPath) return;
+      if (progressActive.current) { toast("已有传输任务进行中，请稍候", true); return; }
       setUploading(true);
       var fd = new FormData();
+      var totalBytes = 0;
       Array.prototype.forEach.call(fileList, function (f) {
         // 文件夹选择/拖拽目录时用相对路径（保留目录结构），普通文件用文件名
         var rel = f._relPath || f.webkitRelativePath || f.name;
         fd.append("files", f, rel);
+        totalBytes += (f.size || 0);
       });
-      // 不要手动设置 Content-Type（boundary 由浏览器自动生成）
-      fetch(API_BASE + "/upload?path=" + encodeURIComponent(curPath), { method: "POST", body: fd, headers: mergeAuthHeaders() })
-        .then(function (r) { return r.json(); })
-        .then(function (data) {
-          if (!data || data.ok === false) throw new Error((data && data.detail) || "上传失败");
+      progressBegin("upload", "上传 " + fileList.length + " 个文件", totalBytes);
+
+      // fetch 不支持上传进度，改用 XHR 的 upload.onprogress
+      var xhr = new XMLHttpRequest();
+      progressAbort.current = function () { xhr.abort(); };
+      xhr.open("POST", API_BASE + "/upload?path=" + encodeURIComponent(curPath), true);
+      var hdrs = mergeAuthHeaders();
+      if (hdrs) {
+        for (var k in hdrs) {
+          if (Object.prototype.hasOwnProperty.call(hdrs, k)) {
+            try { xhr.setRequestHeader(k, hdrs[k]); } catch (e) { /* 忽略 */ }
+          }
+        }
+      }
+      xhr.upload.onprogress = function (ev) {
+        if (!ev) return;
+        if (ev.lengthComputable) progressUpdate(ev.loaded, ev.total);
+        else progressUpdate(ev.loaded, 0);
+      };
+      xhr.onload = function () {
+        var data = null;
+        try { data = JSON.parse(xhr.responseText || "{}"); } catch (e) { data = null; }
+        if (xhr.status >= 200 && xhr.status < 300 && data && data.ok !== false) {
           var dirs = data.dirs || [];
-          var msg = "已上传 " + data.saved.length + " 个文件";
+          var saved = data.saved || [];
+          var msg = "已上传 " + saved.length + " 个文件";
           if (dirs.length) msg += "（新建 " + dirs.length + " 个文件夹）";
-          toast(msg + "：" + data.saved.join("、"));
+          progressDone(msg);
+          toast(msg + "：" + saved.join("、"));
           fetchList(curPath);
-        })
-        .catch(function (err) { toast(String((err && err.message) || err), true); })
-        .finally(function () { setUploading(false); });
+        } else {
+          var detail = (data && (data.detail || data.error || data.message)) || ("HTTP " + xhr.status);
+          progressFail(detail);
+          toast("上传失败：" + detail, true);
+        }
+      };
+      xhr.onerror = function () {
+        progressFail("网络错误");
+        toast("上传失败：网络错误", true);
+      };
+      xhr.onabort = function () {
+        progressCancelled();
+        toast("已取消上传");
+      };
+      xhr.onloadend = function () { setUploading(false); };
+      try {
+        xhr.send(fd);
+      } catch (e) {
+        setUploading(false);
+        progressFail("上传失败：" + ((e && e.message) || e));
+        toast("上传失败：" + ((e && e.message) || e), true);
+      }
     }
 
     function onPickFiles(ev) {
@@ -1553,6 +1899,8 @@
     rowList.forEach(function (entry) {
       var isDir = entry.type === "dir";
       var isSel = !!selected[entry.path];
+      // 符号链接用 🔗 标识（删除/重命名只作用于链接本身，不会动目标）
+      var kindIcon = entry.link ? "🔗 " : (isDir ? "📂 " : "📄 ");
       rows.push(h("tr", {
         key: entry.path,
         style: isSel ? S.rowSelected : S.row,
@@ -1575,14 +1923,14 @@
             onChange: function () { toggleSelect(entry); },
           })),
         h("td", { style: S.td },
-          h("span", { style: isDir ? S.nameDir : S.name }, (isDir ? "📂 " : "📄 ") + entry.name)),
+          h("span", { style: isDir ? S.nameDir : S.name }, kindIcon + entry.name + (entry.broken ? "（链接已失效）" : ""))),
         h("td", { style: S.td }, isDir ? "-" : entry.size_h),
         h("td", { style: S.td }, fmtTime(entry.mtime)),
         h("td", { style: S.td },
           h("button", {
             style: S.opBtn,
-            onClick: function (ev) { ev.stopPropagation(); isDir ? null : downloadOne(entry); },
-            disabled: isDir,
+            title: isDir ? "打包下载该文件夹（zip）" : "下载该文件",
+            onClick: function (ev) { ev.stopPropagation(); isDir ? downloadDir(entry) : downloadOne(entry); },
           }, "下载"),
           h("button", {
             style: S.opBtn,
@@ -1695,26 +2043,8 @@
       });
     }
 
-    // 模式按钮（并排双按钮：当前模式高亮，结构一致）
-    var modeHint = rootInfo && rootInfo.mode_source === "auto"
-      ? (isPlatform ? "已自动识别为 qwenpaw-agentscope-platform 平台" : "未检测到平台环境")
-      : "手动模式";
-    var modeGroup = h("span", { style: { display: "inline-flex", gap: 6, alignItems: "center" } },
-      h("button", {
-        style: isPlatform ? S.btn : S.btnActive,
-        title: "工作区模式：仅访问 QwenPaw 根目录",
-        onClick: isPlatform ? toggleMode : undefined,
-      }, "📦 工作区"),
-      h("button", {
-        style: isPlatform ? S.btnActive : S.btn,
-        title: "平台模式：访问所有支持访问的路径" + (isPlatform ? "（当前生效）" : ""),
-        onClick: isPlatform ? undefined : toggleMode,
-      }, "🌐 平台"),
-      h("span", { style: S.toolHint }, modeHint));
-
-    // 工具栏
+    // 工具栏：刷新 / 收藏 放最前；访问范围由 /status 自动判定，不再显示模式切换
     var toolRow = h("div", { style: S.toolRow },
-      modeGroup,
       h("input", {
         ref: fileInput, type: "file", multiple: true, style: { display: "none" },
         onChange: onPickFiles,
@@ -1724,29 +2054,13 @@
         webkitdirectory: "", directory: "",
         onChange: onPickDir,
       }),
-      // 有对象被选中时隐藏「上传/上传文件夹/新建文件夹」，避免与删除等选择操作同时存在
-      selectedList.length === 0 ? h("span", { key: "create-group", style: { display: "inline-flex", gap: 8, alignItems: "center" } },
-        h("button", {
-          style: S.btnPrimary,
-          onClick: function () { if (fileInput.current) fileInput.current.click(); },
-          disabled: uploading,
-          title: "上传文件到当前目录（支持多选，也可直接把文件/文件夹拖进窗口）",
-        }, uploading ? "⬆ 上传中…" : "⬆ 上传"),
-        h("button", {
-          style: S.btnPrimary,
-          onClick: function () { if (dirInput.current) dirInput.current.click(); },
-          disabled: uploading,
-          title: "上传整个文件夹到当前目录（保留目录结构）",
-        }, uploading ? "⬆ 上传中…" : "📁 上传文件夹"),
-        h("button", { style: S.btnPrimary, onClick: confirmNewDir }, "📁 新建文件夹"))
-        : null,
       h("button", { style: S.btn, onClick: function () { if (curPath) fetchList(curPath); } }, "🔄 刷新"),
       h("div", { style: { position: "relative", flexShrink: 0 } },
         h("button", {
           style: quickOpen ? S.btnActive : S.btn,
-          title: "快捷访问：系统根目录 + 用户自定义（路径行「⭐ 添加到快捷访问」可添加，✕ 可移除）",
-          onClick: function (ev) { ev.stopPropagation(); setQuickOpen(!quickOpen); },
-        }, "⚡ 快捷访问 ▾"),
+          title: "收藏：可访问根目录 + 我的收藏（路径行「收藏」可添加，✕ 可移除）",
+          onClick: function (ev) { ev.stopPropagation(); setRootMenuOpen(false); setQuickOpen(!quickOpen); },
+        }, "⭐ 收藏 ▾"),
         quickOpen ? h("div", {
           style: S.quickMenu,
           onClick: function (ev) { ev.stopPropagation(); },
@@ -1762,9 +2076,9 @@
             ? h("div", { style: S.quickEmpty }, "（无）")
             : null,
           h("div", { style: S.quickDivider }),
-          h("div", { style: S.quickGroupLabel }, "用户自定义"),
+          h("div", { style: S.quickGroupLabel }, "我的收藏"),
           quickCustom.length === 0
-            ? h("div", { style: S.quickEmpty }, "（空，路径行「⭐ 添加到快捷访问」添加）")
+            ? h("div", { style: S.quickEmpty }, "（空，路径行「收藏」添加）")
             : quickCustom.map(function (q) {
                 return h("div", { key: "qc-" + q.path, style: S.quickItem,
                   title: q.path,
@@ -1772,11 +2086,27 @@
                   h("span", { style: S.quickItemLabel }, "📌 " + (q.label || q.path)),
                   h("button", {
                     style: S.quickRemove,
-                    title: "从快捷访问移除",
+                    title: "从收藏移除",
                     onClick: function (ev) { ev.stopPropagation(); removeQuick(q.path); },
                   }, "✕"));
               }))
         : null),
+      // 有对象被选中时隐藏「上传文件/上传文件夹/新建文件夹」，避免与删除等操作同时存在
+      selectedList.length === 0 ? h("span", { key: "create-group", style: { display: "inline-flex", gap: 8, alignItems: "center" } },
+        h("button", {
+          style: S.btnPrimary,
+          onClick: function () { if (fileInput.current) fileInput.current.click(); },
+          disabled: uploading,
+          title: "上传文件到当前目录（支持多选，也可直接把文件/文件夹拖进窗口）",
+        }, uploading ? "⬆ 上传中…" : "⬆ 上传文件"),
+        h("button", {
+          style: S.btnPrimary,
+          onClick: function () { if (dirInput.current) dirInput.current.click(); },
+          disabled: uploading,
+          title: "上传整个文件夹到当前目录（保留目录结构）",
+        }, uploading ? "⬆ 上传中…" : "📁 上传文件夹"),
+        h("button", { style: S.btnPrimary, onClick: confirmNewDir }, "📁 新建文件夹"))
+        : null,
       selectedList.length > 0 ?
         h("span", { style: { display: "inline-flex", gap: 8, alignItems: "center" } },
           h("span", { style: S.toolHint }, "已选 " + selectedList.length + " 项"),
@@ -1787,9 +2117,39 @@
         style: aiOpen ? S.btnActive : S.btn,
         onClick: function () { setAiOpen(!aiOpen); },
         title: "AI 助手：在当前目录下对话（自动附带当前路径与选中文件）",
-      }, "🤖 AI 助手"),
-      h("span", { style: Object.assign({}, S.toolHint, { marginLeft: "auto" }) },
-        isPlatform ? "平台模式：可访问所有支持访问的路径（遵循系统权限）" : "工作区模式：仅 QwenPaw 根目录，点击「🌐 平台模式」可切换"));
+      }, "🤖 AI 助手"));
+
+    // 进度显示派生值（避免在 JSX 里嵌套 IIFE，保持渲染分支简单）
+    var progressPct = null;
+    var progressIndeterminate = false;
+    var progressText = "";
+    var progressSpeedText = "";
+    if (progress) {
+      progressPct = progress.total > 0
+        ? Math.min(100, Math.floor(progress.loaded * 100 / progress.total))
+        : null;
+      var progressFinished = progress.phase === "done" ||
+        progress.phase === "error" || progress.phase === "cancelled";
+      progressIndeterminate = !progressFinished && progressPct === null;
+      if (progress.phase === "error" || progress.phase === "cancelled") {
+        progressText = progress.message || "已停止";
+      } else if (progress.phase === "done") {
+        progressText = progress.message || "完成";
+      } else if (progress.phase === "preparing") {
+        progressText = progress.kind === "download" ? "等待服务器响应…" : "准备上传…";
+      } else if (progress.kind === "upload" && progress.total > 0 &&
+        progress.loaded >= progress.total) {
+        progressText = "已上传 " + fmtSize(progress.total) + "，等待服务器处理…";
+      } else {
+        progressText = fmtSize(progress.loaded) +
+          (progress.total > 0 ? " / " + fmtSize(progress.total) : "") +
+          (progressPct !== null ? "（" + progressPct + "%）" : "");
+      }
+      if (progress.phase === "running" && progress.speed > 0) {
+        progressSpeedText = fmtSize(progress.speed) + "/s";
+      }
+    }
+
 
     return h("div", {
       id: "qfb-root",
@@ -1798,7 +2158,7 @@
       onDragOver: onDragOver,
       onDragLeave: onDragLeave,
       onDrop: onDrop,
-      onClick: function () { setQuickOpen(false); },
+      onClick: function () { setQuickOpen(false); setRootMenuOpen(false); },
     },
       h("div", { style: S.header },
         h("span", { style: S.brand }, "📁 " + PLUGIN_NAME),
@@ -1807,7 +2167,7 @@
           style: S.addr, value: addr,
           placeholder: isPlatform
             ? "输入绝对路径（如 /tmp 或 " + (rootInfo ? rootInfo.workdir : "WORKING_DIR") + "）"
-            : "仅可访问 QwenPaw 根目录：" + (rootInfo ? rootInfo.workdir : "WORKING_DIR"),
+            : "仅可访问 QwenPaw 工作区：" + (rootInfo ? rootInfo.workdir : "WORKING_DIR"),
           onChange: function (ev) { setAddr(ev.currentTarget.value); },
           onKeyDown: function (ev) { if (ev.key === "Enter") { jumpTo(addr); } },
         }),
@@ -1817,36 +2177,80 @@
           onClick: function () {
             if (rootInfo && rootInfo.workdir) { setCurPath(rootInfo.workdir); }
           },
-        }, "🏠 工作区"),
+        }, "工作区"),
       ),
       h("div", {
-        style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid #21262d", flexShrink: 0, overflow: "hidden", cursor: curPath ? "copy" : "default" },
-        title: curPath ? "点击复制当前路径" : undefined,
-        onClick: function () { if (curPath) copyPath(curPath); },
+        // 不设 overflow:hidden：否则「工作区 ▾」的绝对定位下拉会被裁掉
+        style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid #21262d", flexShrink: 0 },
       },
-        h("span", { style: { color: "#8b949e", fontSize: 12, whiteSpace: "nowrap" } }, "路径:"),
-        h("div", { style: S.crumbRow }, crumbs.length ? crumbs : h("span", { style: { color: "#8b949e", fontSize: 12 } }, "…")),
+        h("div", { style: { position: "relative", flexShrink: 0 } },
+          h("button", {
+            style: S.rootBtn,
+            title: "切换路径根目录（工作区 / 根目录）",
+            onClick: function (ev) { ev.stopPropagation(); setQuickOpen(false); setRootMenuOpen(!rootMenuOpen); },
+          }, pathRootLabel + " ▾"),
+          rootMenuOpen ? h("div", {
+            style: S.rootMenu,
+            onClick: function (ev) { ev.stopPropagation(); },
+          },
+            h("div", {
+              style: Object.assign({}, S.rootMenuItem, pathRootLabel === "工作区" ? S.rootMenuItemActive : null),
+              onClick: function (ev) {
+                ev.stopPropagation();
+                setRootMenuOpen(false);
+                if (wdPath) jumpTo(wdPath);
+              },
+            }, "工作区"),
+            h("div", {
+              style: Object.assign({}, S.rootMenuItem, pathRootLabel === "根目录" ? S.rootMenuItemActive : null),
+              onClick: function (ev) { ev.stopPropagation(); setRootMenuOpen(false); jumpTo("/"); },
+            }, "根目录")) : null),
+        h("div", { style: S.crumbRow }, crumbs.length ? crumbs : h("span", { style: { color: "#8b949e" } }, "…")),
         h("button", {
-          style: S.crumbCopyBtn,
+          style: Object.assign({}, S.crumbCopyBtn, { marginLeft: 8 }),
           title: "复制当前路径",
           onClick: function (ev) { ev.stopPropagation(); if (curPath) copyPath(curPath); },
-        }, "📋 复制路径"),
+        }, "复制"),
         h("button", {
           style: Object.assign({}, S.crumbCopyBtn, { color: "#58a6ff" }),
-          title: "将当前路径添加到快捷访问",
+          title: "收藏当前路径",
           onClick: function (ev) { ev.stopPropagation(); addToQuick(curPath); },
-        }, "⭐ 添加到快捷访问")),
+        }, "收藏")),
       toolRow,
       h("div", { style: S.body }, body),
       h("div", { style: S.footer },
         (entries && entries.entries ? entries.entries.length : 0) + " 项" +
         (selectedList.length ? " · 已选 " + selectedList.length + " 项" : "") +
-        " · " + (isPlatform ? "🌐 平台模式" : "📦 工作区模式") +
-        (rootInfo && rootInfo.mode_source === "auto"
-          ? (isPlatform ? "（自动识别）" : "（未检测到平台）")
-          : "（手动）")),
+        " · " + (isPlatform
+          ? "已检测到 agentscope 平台，可访问根目录。"
+          : "未检测到 agentscope 平台，仅支持访问 QwenPaw 工作区（可在收藏夹切换其他工作区）")),
       actionModal,
       previewModal,
+      progress ? h("div", {
+        style: S.progressBox,
+        onClick: function (ev) { ev.stopPropagation(); },
+      },
+        h("div", { style: S.progressHead },
+          h("span", { style: S.progressTitle },
+            (progress.kind === "upload" ? "⬆ " : "⬇ ") + progress.label),
+          (progress.phase === "running" || progress.phase === "preparing")
+            ? h("button", { style: S.progressCancel, onClick: progressCancel, title: "取消传输" }, "取消")
+            : h("span", { style: S.progressState },
+                progress.phase === "done" ? "✅ 完成" :
+                progress.phase === "error" ? "❌ 失败" : "已取消")),
+        h("div", { style: S.progressTrack },
+          h("div", {
+            className: "qfb-progress-bar",
+            style: Object.assign({}, S.progressBar, {
+              width: progressIndeterminate ? "35%" : (progress.phase === "done" ? 100 : Math.max(1, progressPct || 0)) + "%",
+              background: progress.phase === "error" ? "#f85149" :
+                (progress.phase === "done" ? "#2ea043" : "#1f6feb"),
+              animation: progressIndeterminate ? "qfb-indet 1.1s linear infinite" : "none",
+            }),
+          })),
+        h("div", { style: S.progressInfo },
+          h("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, progressText),
+          progressSpeedText ? h("span", { style: { whiteSpace: "nowrap" } }, progressSpeedText) : null)) : null,
       aiOpen ? h("div", { style: S.aiPanel },
         h("div", { style: S.aiHeader },
           h("span", { style: { color: "#e6edf3", fontWeight: 600, fontSize: 13 } }, "🤖 AI 助手"),
@@ -1885,11 +2289,11 @@
                 h("button", { style: Object.assign({}, S.btnDanger, { padding: "2px 10px" }), onClick: function () { resolveApproval(req, false); } }, "拒绝")));
           }) : null,
           aiMsgs.length === 0
-            ? h("div", { style: S.aiEmpty }, "与 AI 对话，发送时自动附带：\n· 当前目录\n· 选中的文件 / 文件夹\n\n对话上下文会保留（刷新不丢失），\n「🗑 清空」可重置会话")
+            ? h("div", { style: S.aiEmpty }, "与 AI 对话，发送时自动附带：\n· 当前目录\n· 选中的文件 / 文件夹\n\n对话上下文会保留（刷新不丢失），\n「🗑 清空」可重置会话\n\n注意：AI 使用该 agent 的完整工具权限，\n不受当前浏览模式限制")
             : aiMsgs.map(function (m, i) {
                 if (m.role === "user") {
                   return h("div", { key: i, style: S.aiRowUser },
-                    h("div", { style: S.aiBubbleUser }, escapeHtml(m.text)));
+                    h("div", { style: S.aiBubbleUser }, m.text));
                 }
                 return h("div", { key: i, style: S.aiRowAi },
                   (m.think ? h("div", { style: S.aiThink },

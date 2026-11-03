@@ -1,5 +1,75 @@
 # 变更记录 (Changelog)
 
+## v0.2.5 - 2026-11-03
+
+### 安全与访问控制
+
+- **1 批量下载软链接越界（数据外泄）**
+  - 根因：`/batch/download` 用 `os.walk(..., followlinks=True)`，只校验入口路径，
+    工作区内 `ln -s /etc` 会被递归打包（实测打包出 1038 个 `/etc` 文件）。
+  - 修复：改为 `followlinks=False` 并显式剪掉符号链接目录；对每个待打包成员
+    （含顶层文件、文件级符号链接）做 realpath 后按当前访问模式复检，越界项跳过，
+    响应头 `X-QFB-Skipped-Count` 记录被跳过数量。
+- **2 删除保护可绕过**
+  - 根因：只精确匹配 `/`、HOME、WORKING_DIR 三个路径，缺少祖先校验；`rename`
+    完全没有调用删除保护。实测删 WORKING_DIR 的父目录、删插件自身目录、rename
+    掉 WORKING_DIR 均返回 200。
+  - 修复：保护集扩展为「`/`、HOME、WORKING_DIR、插件自身目录、`plugins/` 目录、
+    密钥目录（`QWENPAW_SECRET_DIR`）、`/app` `/etc` `/usr` `/workspace` 等顶层
+    系统目录」；同时校验祖先关系，`rename` 复用同一 `_check_deletable`，
+    `/batch/delete` 自动继承。
+- **3 前端存储型 XSS**
+  - 根因：`sanitizeHtml` 是正则清洗，`<svg/onload=alert(1)>` 原样放行、
+    `javas&#99;ript:` 可穿过；内置渲染器不校验 URL scheme。
+  - 修复：改为基于 DOM 的白名单清洗（inert `<template>` 解析，标签 / 属性白名单，
+    剥离 `on*`、`style`、`srcdoc`，未知标签整棵移除）；链接 / 图片 URL 走
+    `http(s)`/`mailto`/`tel`/相对地址白名单，自动补 `rel="noopener noreferrer"`；
+    内置渲染器同样校验 URL scheme。
+- **访问模式**：进程级全局开关（QwenPaw 为个人平台、单用户，不做多用户隔离）；
+  平台环境默认 `platform`，本地部署默认 `workdir`，可 `POST /mode` 切换 / 恢复
+  `auto`；`/status` 返回 `platform_detected`。该风险（任一客户端可切平台模式）
+  在个人平台场景下接受。
+
+### 符号链接与文件操作
+
+- **符号链接语义**：`_resolve` 只做词法规范化，不再 `resolve()` 末级链接；列表返回
+  链接自身路径。此前重命名链接会改掉目标文件、链接变悬空（已实测复现），删除同理。
+  现在删除优先 `unlink()` 链接本身，悬空链接可列出 / 删除，列表用 🔗 标识、
+  失效链接标注「链接已失效」；越界判定仍用 realpath，`ln -s /etc` 依然被 400 拦截。
+- **删除保护**：补充 `/workspace`、`/mnt`、`/media`、`/data`；`_check_deletable`
+  只解析中间目录、保留末级，删链接放行、删 `linkdir/file` 仍按真实目标校验。
+- **`/read` 内存**：传 `max_bytes` 时只读前缀（`fh.read(max_bytes)`），不再全量读入。
+- **阻塞 I/O**：`/status`、`/mode`、`/editor/installed` 改为同步 `def`。
+- **`/batch/download`**：支持重复 `paths=` 参数，文件名含逗号不再被拆开；旧逗号串兼容。
+- **`/ai/models`**：过滤 `enabled=false` 的 provider 与 `hidden/removed` 模型。
+- **健壮性**：含 NUL 字节的非法路径返回 400（原来 500）。
+- **提示文案**：工作区模式拒绝越界路径时，400 提示改为指引调用 `POST /mode`
+  切换平台模式（界面模式按钮已移除），前端同步该文案。
+
+### 传输进度
+
+- 上传：`XMLHttpRequest.upload.onprogress` 展示百分比 / 字节 / 速度；服务器落盘时
+  显示「等待服务器处理…」。
+- 单文件下载：流式 `response.body.getReader()`，无 `Content-Length` 时不定进度 +
+  已接收字节；批量下载同样流式接收。
+- 左下角传输浮层：进度条 + 百分比 + 速度 + 取消；上传与下载互斥；取消与读完后
+  同时发生也能正确收尾。
+- 上传先写 `.qfb-upload-*.part` 再 `os.replace` 原子落位，取消 / 断连不留半个文件。
+
+### 界面
+
+- 界面UI细节调整。
+- 文件列表：文件夹行的「下载」不再禁用，点击直接打包下载（zip）。
+- 底部状态文案：「未检测到 agentscope 平台，仅支持访问 QwenPaw 工作区
+  （可在收藏夹切换其他工作区）」/「已检测到 agentscope 平台，可访问根目录。」
+
+### 测试
+
+- `tests/test_plugin_safety.py`（16 个离线用例）+ `tests/test_live_api.py`
+  （2 个可选在线冒烟，`QFB_LIVE_BASE` 时运行）；`pytest.ini` 固定 `testpaths = tests`。
+
+- 版本号统一为 0.2.5（plugin.py / plugin.json / ui/index.js / README）
+
 ## v0.2.4 - 2026-09-17
 
 - **修复：7 个文件 I/O 处理器阻塞事件循环**
